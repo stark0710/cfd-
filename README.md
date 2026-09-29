@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # TorqWings CFD Agent (fixed-wing UAV)
 
 AI-assisted CFD workflow: upload STEP -> standard flight case -> run lifecycle -> results/report.
@@ -24,3 +25,6 @@ Backend: `python3 backend/server.py` (health check: http://localhost:8000/health
 
 ## Rules
 Never show demo values as real results. Never claim convergence from a plausible-looking graph.
+=======
+# cfd-
+>>>>>>> origin/main
