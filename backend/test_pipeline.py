@@ -29,6 +29,9 @@ class T(unittest.TestCase):
         r.flush(); self.assertEqual(ev[0]["vals"], {"Ux": 0.5, "p": 0.9}); self.assertTrue(r.converged)
         m = P.parse_checkmesh("    cells:            1234\n    Mesh non-orthogonality Max: 40.5 average: 5\n    Max skewness = 0.8\nMesh OK.\n"); self.assertTrue(m["mesh_ok"]); self.assertEqual(m["cells"], 1234); self.assertEqual(m["max_non_orthogonality"], 40.5)
         y = P.parse_yplus("patch aircraft_aircraft y+ : min = 10.5, max = 400, average = 120.25"); self.assertEqual(y["avg"], 120.25)
+    def test_vtk(self):
+        v = "# vtk DataFile Version 2.0\nx\nASCII\nDATASET POLYDATA\nPOINTS 3 float\n0 0 0 1 0 0 0 1 0\nPOLYGONS 1 4\n3 0 1 2\nPOINT_DATA 3\nSCALARS p float 1\nLOOKUP_TABLE default\n1.5 2.5 -3.5\n"
+        pts, vals = P.read_vtk_points_scalar(v); self.assertEqual(len(pts), 3); self.assertEqual(vals, [1.5, 2.5, -3.5]); self.assertIsNone(P.read_vtk_points_scalar("garbage"))
     def test_forces(self):
         d = os.path.join(self.d, "fc", "postProcessing", "forces", "0"); os.makedirs(d)
         open(os.path.join(d, "force.dat"), "w").write("# Time (total_x total_y total_z) (pressure_x pressure_y pressure_z) (viscous_x viscous_y viscous_z)\n" + "".join(f"{i} ((1.0 0.0 10.0) (0.9 0 9.9) (0.1 0 0.1))\n" for i in range(1, 30)))

@@ -171,6 +171,42 @@ def parse_yplus(text):
     m = re.search(r"y\+ : min = ([\d.eE+-]+), max = ([\d.eE+-]+), average = ([\d.eE+-]+)", text)
     return dict(min=float(m.group(1)), max=float(m.group(2)), avg=float(m.group(3))) if m else None
 
+def read_vtk_points_scalar(text):
+    """Minimal legacy-ASCII VTK reader: returns (points, values) for POINT_DATA scalars, or None."""
+    tk = text.split()
+    try:
+        i = tk.index("POINTS"); n = int(tk[i+1]); c = [float(x) for x in tk[i+3:i+3+3*n]]
+        j = tk.index("POINT_DATA", i); k = tk.index("SCALARS", j); s = k+4
+        if tk[s] == "LOOKUP_TABLE": s += 2
+        v = [float(x) for x in tk[s:s+n]]
+    except (ValueError, IndexError): return None
+    if len(c) != 3*n or len(v) != n: return None
+    return [(c[3*a], c[3*a+1], c[3*a+2]) for a in range(n)], v
+
+def postprocess_cp(case, out_png, V, bbox):
+    """Surface pressure at mid-span -> Cp plot. Never raises: returns dict or None (with reason)."""
+    try:
+        _w(case, "system/cpSurfaces", "dictionary", "cpSurfaces", 'type surfaces; libs ("libsampling.so"); writeControl writeTime; interpolationScheme cell; surfaceFormat vtk; fields (p);\nsurfaces { aircraft { type patch; patches ("aircraft.*"); interpolate true; } }\n')
+        of_run(case, "simpleFoam -postProcess -dict system/cpSurfaces -latestTime", "log.cpSurfaces")
+        fs = sorted(glob.glob(os.path.join(case, "postProcessing", "**", "*.vtk"), recursive=True))
+        if not fs: return dict(error="no surface output written (see log.cpSurfaces)")
+        with open(fs[-1]) as fh: r = read_vtk_points_scalar(fh.read())
+        if r is None: return dict(error="could not read surface VTK (see log.cpSurfaces)")
+        pts, vals = r; x0, y0, z0, x1, y1, z1 = bbox; c = x1-x0; ym = (y0+y1)/2; zm = (z0+z1)/2; band = 0.05*(y1-y0)
+        sel = [(((p[0]-x0)/c), v/(0.5*V*V), p[2] >= zm) for p, v in zip(pts, vals) if abs(p[1]-ym) < band]
+        if not sel: return dict(error="no surface points near mid-span")
+        cmin = min(sel, key=lambda s: s[1]); res = dict(cp_min=cmin[1], cp_min_x_over_c=cmin[0], points=len(sel), png=None)
+        try:
+            import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(6, 4))
+            for up, lab, col in ((True, "upper", "tab:blue"), (False, "lower", "tab:red")):
+                d = sorted((s[0], s[1]) for s in sel if s[2] == up); ax.plot([a for a, _ in d], [b for _, b in d], ".", ms=3, label=lab, color=col)
+            ax.invert_yaxis(); ax.set_xlabel("x/c (chord proxy)"); ax.set_ylabel("Cp = p/(0.5 V^2)"); ax.grid(alpha=.3); ax.legend()
+            ax.set_title("Surface pressure at mid-span (solver output, unvalidated)"); fig.tight_layout(); fig.savefig(out_png, dpi=120); plt.close(fig); res["png"] = out_png
+        except ImportError: res["note"] = "matplotlib not installed: plot skipped"
+        return res
+    except Exception as e: return dict(error=f"{type(e).__name__}: {e}")
+
 def dot(a, b): return sum(x*y for x, y in zip(a, b))
 def force_summary(rows, drag_dir, lift_dir):
     if not rows: return None
@@ -207,6 +243,8 @@ def run_pipeline(step_path, workdir, emit):
         if yp is not None and yp["max"] <= 0: res["yplus"] = yp = None
         if yp is None: res["warnings"].append("y+ could not be evaluated (postProcess returned no valid values).")
         elif not (30 <= yp["avg"] <= 300): res["warnings"].append(f"Average y+ = {yp['avg']:.3g} is outside the 30-300 range that wall functions need: drag/lift are not trustworthy.")
+        res["cp"] = postprocess_cp(case, os.path.join(workdir, "cp_midspan.png"), CASE["V"], info["bbox_m"])
+        if not res["cp"] or res["cp"].get("error"): res["warnings"].append("Cp plot unavailable: " + str((res["cp"] or {}).get("error", "unknown")))
         fs = force_summary(parse_forces(case), meta["wind_dir"], meta["lift_dir"]); res["forces"] = fs
         if fs is None: res["warnings"].append("Force output not found: lift/drag unavailable.")
         else:
@@ -216,7 +254,7 @@ def run_pipeline(step_path, workdir, emit):
         if not rp.converged: res["warnings"].append(f"Residual targets not met within {END_TIME} iterations.")
         res["warnings"] += ["No prism layers and a coarse mesh: treat drag and lift as unreliable until refined and validated.", "Not validated against reference data yet.",
                             "Force coefficients unavailable: reference area/length are not defined for this geometry. Forces are in Newtons.",
-                            "Pressure/velocity field plots are not produced by v1 (results are in the case folder)."]
+                            "Velocity field plots are not produced by v1; surface Cp at mid-span is (cp_midspan.png). Full fields are in the case folder."]
         res["status"] = "completed_with_warnings"
     except PipelineError as e:
         res["error"] = dict(code=e.code, message=str(e)); emit(type="error", code=e.code, m=str(e))
@@ -236,6 +274,6 @@ def make_report(r):
           f"- Density {a.get('rho', float('nan')):.4f} kg/m3, kinematic viscosity {a.get('nu', float('nan')):.3e} m2/s (calculated, ISA)", f"- Solver: {s['solver']}, {s['end_time']} iteration limit, mesh levels {s['mesh_levels']}",
           "", "## Geometry", f"- Solids {g.get('solids', 'n/a')}, faces {g.get('faces', 'n/a')}, size {fmt(g.get('length_scale_m'), 'm')}, wetted area {fmt(g.get('wetted_area_m2'), 'm2')}",
           "", "## Mesh", f"- y+ (wall): {('avg %.3g, max %.3g' % (r['yplus']['avg'], r['yplus']['max'])) if r.get('yplus') else 'unavailable'}", f"- Cells {m.get('cells', 'unavailable')}, max non-orthogonality {fmt(m.get('max_non_orthogonality'))}, max skewness {fmt(m.get('max_skewness'))}, checkMesh OK: {m.get('mesh_ok', 'unavailable')}",
-          "", "## Results (calculated by the solver)", f"- Lift {fmt(f.get('lift_N'), 'N')}, drag {fmt(f.get('drag_N'), 'N')}, L/D {fmt(f.get('lift_to_drag'))}", f"- Drag split: pressure {fmt(f.get('pressure_drag_N'), 'N')}, viscous {fmt(f.get('viscous_drag_N'), 'N')}",
+          "", "## Results (calculated by the solver)", f"- Lift {fmt(f.get('lift_N'), 'N')}, drag {fmt(f.get('drag_N'), 'N')}, L/D {fmt(f.get('lift_to_drag'))}", f"- Mid-span Cp: " + (("min %.3g at x/c=%.3f; plot %s" % (r["cp"]["cp_min"], r["cp"]["cp_min_x_over_c"], r["cp"].get("png") or "not drawn")) if r.get("cp") and "cp_min" in r["cp"] else "unavailable"), f"- Drag split: pressure {fmt(f.get('pressure_drag_N'), 'N')}, viscous {fmt(f.get('viscous_drag_N'), 'N')}",
           "- CL, CD: unavailable (no reference area/length defined)", f"- Residual targets met: {r.get('residual_criteria_met', 'unavailable')} (iterations run: {r.get('iterations', 'n/a')}). This alone does not prove convergence or accuracy.", "", "## Warnings and assumptions"]
     return "\n".join(L + [f"- {w}" for w in r["warnings"]] + [""])
