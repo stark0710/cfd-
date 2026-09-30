@@ -1,0 +1,118 @@
+{
+ "demo": false,
+ "status": "completed_with_warnings",
+ "warnings": [
+  "Orientation not stored in STEP: assumed nose toward -X, +Y starboard, +Z up.",
+  "Watertightness verified on the Gmsh surface mesh; CAD-level defects may still exist.",
+  "Mesh size is set from a chord proxy (middle bounding-box dimension), not a true chord.",
+  "Residual targets not met within 1200 iterations.",
+  "No prism layers and a coarse mesh: treat drag and lift as unreliable until refined and validated.",
+  "Not validated against reference data yet.",
+  "Force coefficients unavailable: reference area/length are not defined for this geometry. Forces are in Newtons.",
+  "Pressure/velocity field plots are not produced by v1 (results are in the case folder)."
+ ],
+ "settings": {
+  "V": 25.0,
+  "H": 0.0,
+  "alpha": 4.0,
+  "beta": 0.0,
+  "mesh_levels": "5 7",
+  "end_time": 1200,
+  "solver": "simpleFoam kOmegaSST (opencfd/openfoam-default:2312)"
+ },
+ "air": {
+  "T": 288.15,
+  "p": 101325.0,
+  "rho": 1.2249781262066513,
+  "mu": 1.789380278077583e-05,
+  "nu": 1.460744677636569e-05,
+  "a": 340.2970287557621
+ },
+ "geometry": {
+  "solids": 1,
+  "faces": 4,
+  "bbox_m": [
+   -1e-07,
+   -0.5000001,
+   -0.012015250294705493,
+   0.20000010000000001,
+   0.5000001,
+   0.012015250294710112
+  ],
+  "length_scale_m": 1.0000002,
+  "warnings": [
+   "Orientation not stored in STEP: assumed nose toward -X, +Y starboard, +Z up.",
+   "Watertightness verified on the Gmsh surface mesh; CAD-level defects may still exist."
+  ],
+  "triangles": 78358,
+  "open_edges": 0,
+  "nonmanifold_edges": 0,
+  "wetted_area_m2": 0.41440804605451964
+ },
+ "domain": {
+  "levels": "5 7",
+  "surface_cell_m": 0.0013020835937499998,
+  "chord_proxy_m": 0.20000020000000002,
+  "domain_m": [
+   -3.0000006999999997,
+   -3.5000006999999997,
+   -3.012015850294705,
+   6.2000013,
+   3.5000006999999997,
+   3.01201585029471
+  ],
+  "background_cells": [
+   56,
+   43,
+   37
+  ],
+  "location_in_mesh": [
+   -1.5000003999999998,
+   0.0,
+   2.3097843082631186e-15
+  ],
+  "wind_dir": [
+   0.9975640502598242,
+   -0.0,
+   0.0697564737441253
+  ],
+  "lift_dir": [
+   -0.06975647374412529,
+   0.0,
+   0.9975640502598242
+  ],
+  "U": [
+   24.939101256495604,
+   -0.0,
+   1.7439118436031324
+  ],
+  "k": 0.09375,
+  "omega": 641.7959376150802
+ },
+ "mesh": {
+  "cells": 559619,
+  "max_non_orthogonality": 48.369386,
+  "max_skewness": 2.0901589,
+  "mesh_ok": true,
+  "failed_checks": null
+ },
+ "residual_criteria_met": false,
+ "iterations": 1200,
+ "yplus": {
+  "min": 3.6827746,
+  "max": 220.39825,
+  "avg": 32.508799
+ },
+ "forces": {
+  "lift_N": 8.855529309312573,
+  "drag_N": 2.1294592033485062,
+  "lift_to_drag": 4.158581340928033,
+  "window_iterations": 240,
+  "lift_drift": 0.00014057150108701957,
+  "drag_drift": 0.00011303866302787202,
+  "pressure_drag_N": 1.959514005758412,
+  "viscous_drag_N": 0.16994520368708904,
+  "pressure_lift_N": 8.85605485723453,
+  "viscous_lift_N": -0.0005255467443939076
+ }
+}

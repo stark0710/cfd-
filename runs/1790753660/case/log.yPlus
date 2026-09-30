@@ -1,0 +1,45 @@
+/*---------------------------------------------------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  2312                                  |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+Build  : _c39a0f64-20231220 OPENFOAM=2312 version=2312
+Arch   : "LSB;label=32;scalar=64"
+Exec   : postProcess -func yPlus -latestTime
+Date   : Sep 30 2026
+Time   : 07:40:08
+Host   : 2025cb729365
+PID    : 1
+I/O    : uncollated
+Case   : /case
+nProcs : 1
+trapFpe: Floating point exception trapping enabled (FOAM_SIGFPE).
+fileModificationChecking : Monitoring run-time modified files using timeStampMaster (fileModificationSkew 5, maxFileModificationPolls 20)
+allowSystemOperations : Allowing user-supplied system call operations
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+Create time
+
+Create mesh for time = 600
+
+Time = 600
+
+Reading fields:
+
+Executing functionObjects
+--> FOAM Warning : 
+    From virtual bool Foam::functionObjects::yPlus::execute()
+    in file yPlus/yPlus.C at line 173
+    Unable to find turbulence model in the database: yPlus will not be calculated
+--> FOAM Warning : 
+    From virtual bool Foam::functionObjects::yPlus::execute()
+    in file yPlus/yPlus.C at line 179
+    Please try to use the solver option -postProcess, e.g.: <solver> -postProcess -func yPlus
+yPlus yPlus write:
+    writing field yPlus
+    patch aircraft y+ : min = 0, max = 0, average = 0
+
+End
+
