@@ -163,7 +163,7 @@ def parse_forces(case):
         for ln in open(fs[-1]).read().splitlines():
             if ln.startswith("#"): continue
             nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", ln.replace("(", " ").replace(")", " "))
-            if len(nums) >= 4: rows.append([float(x) for x in nums[:4]])
+            if len(nums) >= 4: rows.append([float(x) for x in nums[:10]])
     return rows   # [time, Fx, Fy, Fz] total (pressure+viscous), Newtons
 
 def parse_yplus(text):
@@ -174,9 +174,10 @@ def dot(a, b): return sum(x*y for x, y in zip(a, b))
 def force_summary(rows, drag_dir, lift_dir):
     if not rows: return None
     D = [dot(r[1:4], drag_dir) for r in rows]; Lf = [dot(r[1:4], lift_dir) for r in rows]
+    full = len(rows[-1]) >= 10; split = dict(pressure_drag_N=dot(rows[-1][4:7], drag_dir), viscous_drag_N=dot(rows[-1][7:10], drag_dir), pressure_lift_N=dot(rows[-1][4:7], lift_dir), viscous_lift_N=dot(rows[-1][7:10], lift_dir)) if full else {}
     tail = max(10, len(rows)//5); dt, lt = D[-tail:], Lf[-tail:]
     drift = lambda a: (max(a)-min(a))/abs(sum(a)/len(a)) if abs(sum(a)/len(a)) > 1e-12 else None
-    return dict(lift_N=Lf[-1], drag_N=D[-1], lift_to_drag=(Lf[-1]/D[-1] if abs(D[-1]) > 1e-12 else None), window_iterations=tail, lift_drift=drift(lt), drag_drift=drift(dt))
+    return dict(lift_N=Lf[-1], drag_N=D[-1], lift_to_drag=(Lf[-1]/D[-1] if abs(D[-1]) > 1e-12 else None), window_iterations=tail, lift_drift=drift(lt), drag_drift=drift(dt), **split)
 
 # ---------- main entry ----------
 def run_pipeline(step_path, workdir, emit):
@@ -193,16 +194,17 @@ def run_pipeline(step_path, workdir, emit):
         if of_run(case, "blockMesh", "log.blockMesh", lambda l: None): raise PipelineError("blockmesh_failed", "blockMesh failed (see log.blockMesh)")
         if of_run(case, "snappyHexMesh -overwrite", "log.snappyHexMesh", lambda l: emit(type="log", m=l) if re.match(r"(Surface snapping|Mesh refinement|Layer addition|Writing mesh)", l) else None):
             raise PipelineError("snappy_failed", "snappyHexMesh failed (see log.snappyHexMesh)")
-        of_run(case, "checkMesh", "log.checkMesh"); mq = parse_checkmesh(open(os.path.join(case, "log.checkMesh")).read())  # noqa; res["mesh"] = mq
+        of_run(case, "checkMesh", "log.checkMesh"); mq = parse_checkmesh(open(os.path.join(case, "log.checkMesh")).read()); res["mesh"] = mq
         emit(type="log", m=f"Mesh: {mq['cells']} cells, max non-orthogonality {mq['max_non_orthogonality']}, max skewness {mq['max_skewness']}, checkMesh OK={mq['mesh_ok']}")
         if not mq["mesh_ok"]: raise PipelineError("mesh_failed", f"checkMesh reported {mq['failed_checks'] or 'unknown'} failed checks; not solving on a bad mesh.")
         stage(3); emit(type="log", m=f"Solver setup: V={CASE['V']} m/s, alpha={CASE['alpha']} deg, beta={CASE['beta']} deg, rho={atm['rho']:.4f}, nu={atm['nu']:.3e}")
         stage(4); rp = ResidualParser(emit)
         if of_run(case, "simpleFoam", "log.simpleFoam", rp.feed): raise PipelineError("solver_failed", "simpleFoam exited with an error (see log.simpleFoam)")
         rp.flush(); res["residual_criteria_met"] = rp.converged; res["iterations"] = rp.it
-        stage(5); of_run(case, "postProcess -func yPlus -latestTime", "log.yPlus"); res["yplus"] = parse_yplus(open(os.path.join(case, "log.yPlus")).read())
+        stage(5); of_run(case, "simpleFoam -postProcess -func yPlus -latestTime", "log.yPlus"); res["yplus"] = parse_yplus(open(os.path.join(case, "log.yPlus")).read())
         yp = res["yplus"]
-        if yp is None: res["warnings"].append("y+ could not be evaluated.")
+        if yp is not None and yp["max"] <= 0: res["yplus"] = yp = None
+        if yp is None: res["warnings"].append("y+ could not be evaluated (postProcess returned no valid values).")
         elif not (30 <= yp["avg"] <= 300): res["warnings"].append(f"Average y+ = {yp['avg']:.3g} is outside the 30-300 range that wall functions need: drag/lift are not trustworthy.")
         fs = force_summary(parse_forces(case), meta["wind_dir"], meta["lift_dir"]); res["forces"] = fs
         if fs is None: res["warnings"].append("Force output not found: lift/drag unavailable.")
@@ -233,6 +235,6 @@ def make_report(r):
           f"- Density {a.get('rho', float('nan')):.4f} kg/m3, kinematic viscosity {a.get('nu', float('nan')):.3e} m2/s (calculated, ISA)", f"- Solver: {s['solver']}, {s['end_time']} iteration limit, mesh levels {s['mesh_levels']}",
           "", "## Geometry", f"- Solids {g.get('solids', 'n/a')}, faces {g.get('faces', 'n/a')}, size {fmt(g.get('length_scale_m'), 'm')}, wetted area {fmt(g.get('wetted_area_m2'), 'm2')}",
           "", "## Mesh", f"- y+ (wall): {('avg %.3g, max %.3g' % (r['yplus']['avg'], r['yplus']['max'])) if r.get('yplus') else 'unavailable'}", f"- Cells {m.get('cells', 'unavailable')}, max non-orthogonality {fmt(m.get('max_non_orthogonality'))}, max skewness {fmt(m.get('max_skewness'))}, checkMesh OK: {m.get('mesh_ok', 'unavailable')}",
-          "", "## Results (calculated by the solver)", f"- Lift {fmt(f.get('lift_N'), 'N')}, drag {fmt(f.get('drag_N'), 'N')}, L/D {fmt(f.get('lift_to_drag'))}",
+          "", "## Results (calculated by the solver)", f"- Lift {fmt(f.get('lift_N'), 'N')}, drag {fmt(f.get('drag_N'), 'N')}, L/D {fmt(f.get('lift_to_drag'))}", f"- Drag split: pressure {fmt(f.get('pressure_drag_N'), 'N')}, viscous {fmt(f.get('viscous_drag_N'), 'N')}",
           "- CL, CD: unavailable (no reference area/length defined)", f"- Residual targets met: {r.get('residual_criteria_met', 'unavailable')} (iterations run: {r.get('iterations', 'n/a')}). This alone does not prove convergence or accuracy.", "", "## Warnings and assumptions"]
     return "\n".join(L + [f"- {w}" for w in r["warnings"]] + [""])
