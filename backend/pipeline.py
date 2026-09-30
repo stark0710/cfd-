@@ -9,6 +9,7 @@ IMAGE = os.environ.get("OPENFOAM_IMAGE", "opencfd/openfoam-default:2312")
 BASHRC = os.environ.get("OPENFOAM_BASHRC", "/usr/lib/openfoam/openfoam2312/etc/bashrc")
 MESH_LEVELS = os.environ.get("MESH_LEVELS")                  # e.g. "5 5"; unset = auto from chord proxy
 END_TIME = int(os.environ.get("END_TIME", "600"))
+RESOLVE_ANGLE = os.environ.get("RESOLVE_ANGLE", "10")       # deg: surface curvature above which the max refinement level applies (LE/TE)
 CASE = dict(V=float(os.environ.get("CFD_V", 25)), H=float(os.environ.get("CFD_H", 0)), alpha=float(os.environ.get("CFD_ALPHA", 4)), beta=float(os.environ.get("CFD_BETA", 0)))  # fixed standard case; env overrides are for testing only
 STAGES = ["Geometry inspection", "Domain setup", "Meshing", "Solver setup", "Solving", "Post-processing", "Report generation"]
 
@@ -96,14 +97,14 @@ mergePatchPairs ();
 geometry { aircraft.stl { type triSurfaceMesh; name aircraft; } }
 castellatedMeshControls { maxLocalCells 1000000; maxGlobalCells 3000000; minRefinementCells 10; maxLoadUnbalance 0.10; nCellsBetweenLevels 3; features ();
   refinementSurfaces { aircraft { level ($lv); patchInfo { type wall; } } }
-  resolveFeatureAngle 30; refinementRegions {} locationInMesh ($lx $ly $lz); allowFreeStandingZoneFaces true; }
+  resolveFeatureAngle $rfa; refinementRegions {} locationInMesh ($lx $ly $lz); allowFreeStandingZoneFaces true; }
 snapControls { nSmoothPatch 3; tolerance 2.0; nSolveIter 50; nRelaxIter 5; nFeatureSnapIter 10; implicitFeatureSnap false; explicitFeatureSnap false; multiRegionFeatureSnap false; }
 addLayersControls { relativeSizes true; layers {} expansionRatio 1.0; finalLayerThickness 0.3; minThickness 0.1; nGrow 0; featureAngle 60; nRelaxIter 3;
   nSmoothSurfaceNormals 1; nSmoothNormals 3; nSmoothThickness 10; maxFaceThicknessRatio 0.5; maxThicknessToMedialRatio 0.3; minMedialAxisAngle 90; nBufferCellsNoExtrude 0; nLayerIter 50; }
 meshQualityControls { maxNonOrtho 65; maxBoundarySkewness 20; maxInternalSkewness 4; maxConcave 80; minVol 1e-13; minTetQuality 1e-15; minArea -1; minTwist 0.02;
   minDeterminant 0.001; minFaceWeight 0.05; minVolRatio 0.01; minTriangleTwist -1; nSmoothScale 4; errorReduction 0.75; }
 mergeTolerance 1e-6; debug 0;
-""", lv=levels, lx=loc[0], ly=loc[1], lz=loc[2])
+""", lv=levels, rfa=RESOLVE_ANGLE, lx=loc[0], ly=loc[1], lz=loc[2])
     _w(case, "system/controlDict", "dictionary", "controlDict", """application simpleFoam; startFrom startTime; startTime 0; stopAt endTime; endTime $et; deltaT 1;
 writeControl timeStep; writeInterval 100; purgeWrite 2; writeFormat ascii; writePrecision 8; timeFormat general; timePrecision 6; runTimeModifiable true;
 functions { forces { type forces; libs ("libforces.so"); patches ("aircraft.*"); rho rhoInf; rhoInf $rho; CofR (0 0 0); writeControl timeStep; writeInterval 1; } }
