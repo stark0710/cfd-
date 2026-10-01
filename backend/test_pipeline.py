@@ -18,7 +18,8 @@ class T(unittest.TestCase):
         case = os.path.join(self.d, "case"); atm = P.isa(0); m = P.write_case(case, i, atm)
         for f in ["system/blockMeshDict", "system/snappyHexMeshDict", "system/controlDict", "system/fvSchemes", "system/fvSolution", "constant/transportProperties", "constant/turbulenceProperties", "0/U", "0/p", "0/k", "0/omega", "0/nut"]:
             t = open(os.path.join(case, f)).read(); self.assertEqual(t.count("{"), t.count("}"), f); self.assertNotIn("$", t, f)
-        self.assertEqual(m["levels"], "5 5"); self.assertAlmostEqual(m["chord_proxy_m"], 0.2, 2)
+        self.assertEqual(m["levels"], "5 5"); self.assertTrue(0.0008 < m["layers"]["first_m"] < 0.0016); self.assertEqual(m["layers"]["n"], 4)
+        self.assertIn("addLayers true", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertIn("nSurfaceLayers 4", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertAlmostEqual(m["chord_proxy_m"], 0.2, 2)
         x, y, z = m["location_in_mesh"]; b = i["bbox_m"]; self.assertLess(x, b[0]); self.assertGreater(x, m["domain_m"][0])
     def test_bad_step(self):
         p = os.path.join(self.d, "bad.step"); open(p, "w").write("ISO-10303-21;\nEND-ISO-10303-21;\n")
@@ -38,6 +39,9 @@ class T(unittest.TestCase):
         f = os.path.join(self.d, "s.vtp"); open(f, "w").write(x); pts, v = P.read_surface_file(f); self.assertEqual(v, [4.0, 5.0]); self.assertEqual(pts[1], (1.0, 0.0, 0.0))
         open(f, "w").write(x.replace('format="ascii"', 'format="appended"'));
         with self.assertRaises(ValueError): P.read_surface_file(f)
+    def test_layers_log(self):
+        log = "Extruding 70234 out of 85730 faces (81.9%). Wrote mesh in 5 s.\npatch                          faces    layers avg thickness[m]\n                                         near-wall overall\n-----                          -----    ------ --------   -------\naircraft_aircraft              85730    3.2    0.00112    0.00381\n"
+        r = P.parse_layers(log); self.assertAlmostEqual(r["coverage_pct"], 81.9); self.assertAlmostEqual(r["avg_layers"], 3.2); self.assertIsNone(P.parse_layers("nothing"))
     def test_forces(self):
         d = os.path.join(self.d, "fc", "postProcessing", "forces", "0"); os.makedirs(d)
         open(os.path.join(d, "force.dat"), "w").write("# Time (total_x total_y total_z) (pressure_x pressure_y pressure_z) (viscous_x viscous_y viscous_z)\n" + "".join(f"{i} ((1.0 0.0 10.0) (0.9 0 9.9) (0.1 0 0.1))\n" for i in range(1, 30)))
