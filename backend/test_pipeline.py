@@ -19,7 +19,7 @@ class T(unittest.TestCase):
         for f in ["system/blockMeshDict", "system/snappyHexMeshDict", "system/controlDict", "system/fvSchemes", "system/fvSolution", "constant/transportProperties", "constant/turbulenceProperties", "0/U", "0/p", "0/k", "0/omega", "0/nut"]:
             t = open(os.path.join(case, f)).read(); self.assertEqual(t.count("{"), t.count("}"), f); self.assertNotIn("$", t, f)
         self.assertEqual(m["levels"], "5 5"); self.assertTrue(0.0008 < m["layers"]["first_m"] < 0.0016); self.assertEqual(m["layers"]["n"], 4)
-        self.assertIn("addLayers true", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertIn("nSurfaceLayers 4", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertAlmostEqual(m["chord_proxy_m"], 0.2, 2)
+        self.assertIn("addLayers true", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertIn("relaxed { maxNonOrtho 70", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertIn("nSurfaceLayers 4", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertAlmostEqual(m["chord_proxy_m"], 0.2, 2)
         x, y, z = m["location_in_mesh"]; b = i["bbox_m"]; self.assertLess(x, b[0]); self.assertGreater(x, m["domain_m"][0])
     def test_bad_step(self):
         p = os.path.join(self.d, "bad.step"); open(p, "w").write("ISO-10303-21;\nEND-ISO-10303-21;\n")

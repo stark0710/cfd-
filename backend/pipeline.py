@@ -108,7 +108,8 @@ snapControls { nSmoothPatch 3; tolerance 2.0; nSolveIter 50; nRelaxIter 5; nFeat
 addLayersControls { relativeSizes false; layers { "aircraft.*" { nSurfaceLayers $nl; } } expansionRatio $er; firstLayerThickness $flt; minThickness $mint; nGrow 0; featureAngle 130; slipFeatureAngle 30; nRelaxIter 5;
   nSmoothSurfaceNormals 1; nSmoothNormals 3; nSmoothThickness 10; maxFaceThicknessRatio 0.5; maxThicknessToMedialRatio 0.3; minMedialAxisAngle 90; nBufferCellsNoExtrude 0; nLayerIter 50; nRelaxedIter 20; }
 meshQualityControls { maxNonOrtho 65; maxBoundarySkewness 20; maxInternalSkewness 4; maxConcave 80; minVol 1e-13; minTetQuality 1e-15; minArea -1; minTwist 0.02;
-  minDeterminant 0.001; minFaceWeight 0.05; minVolRatio 0.01; minTriangleTwist -1; nSmoothScale 4; errorReduction 0.75; }
+  minDeterminant 0.001; minFaceWeight 0.05; minVolRatio 0.01; minTriangleTwist -1; nSmoothScale 4; errorReduction 0.75;
+  relaxed { maxNonOrtho 70; minTetQuality -1e30; } }
 mergeTolerance 1e-6; debug 0;
 """, lv=levels, rfa=RESOLVE_ANGLE, addl="true" if LAYERS else "false", nl=max(LAYERS, 1), er=er, flt=y1, mint=0.25*y1, lx=loc[0], ly=loc[1], lz=loc[2])
     _w(case, "system/controlDict", "dictionary", "controlDict", """application simpleFoam; startFrom startTime; startTime 0; stopAt endTime; endTime $et; deltaT 1;
@@ -267,7 +268,7 @@ def run_pipeline(step_path, workdir, emit):
         stage(0); atm = isa(CASE["H"]); res["air"] = atm
         info = geometry_to_stl(step_path, os.path.join(case, "constant", "triSurface", "aircraft.stl")); res["geometry"] = info; res["warnings"] += info["warnings"] + ["Mesh size is set from a chord proxy (middle bounding-box dimension), not a true chord."]
         emit(type="log", m=f"Geometry: {info['solids']} solid, {info['faces']} faces, size {info['length_scale_m']:.3f} m, {info['triangles']} surface triangles, watertight")
-        stage(1); meta = write_case(case, info, atm); res["domain"] = meta; res["settings"]["mesh_levels"] = meta["levels"]
+        stage(1); meta = write_case(case, info, atm); res["domain"] = meta; res["settings"]["mesh_levels"] = meta["levels"]; res["layers"] = dict(meta["layers"])
         emit(type="log", m=f"Domain box written; background cells {meta['background_cells']}; surface level {meta['levels']} = {meta['surface_cell_m']*1000:.1f} mm cells (chord proxy {meta['chord_proxy_m']:.3f} m, {meta['chord_proxy_m']/meta['surface_cell_m']:.0f} cells)")
         stage(2)
         if of_run(case, "blockMesh", "log.blockMesh", lambda l: None): raise PipelineError("blockmesh_failed", "blockMesh failed (see log.blockMesh)")
