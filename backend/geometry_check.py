@@ -21,8 +21,11 @@ def read_stl_vertices(path):
 run = os.path.abspath(sys.argv[1]); case = os.path.join(run, "case")
 x0, y0, z0, x1, y1, z1 = json.load(open(os.path.join(run, "results.json")))["geometry"]["bbox_m"]
 c = x1-x0; ym = (y0+y1)/2; band = 0.05*(y1-y0)
-vtp = sorted(glob.glob(os.path.join(case, "postProcessing", "cpSurfaces", "*", "*.vtp")), key=lambda f: float(os.path.basename(os.path.dirname(f))))[-1]
-S = read_vtp_points(vtp); T = read_stl_vertices(os.path.join(case, "constant", "triSurface", "aircraft.stl"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import pipeline as P
+fs = sorted(glob.glob(os.path.join(case, "postProcessing", "cpSurfaces", "*", "*.vt[kp]")), key=lambda f: (float(os.path.basename(os.path.dirname(f))), os.path.getmtime(f)))
+if not fs: raise SystemExit("no surface file in " + os.path.join(case, "postProcessing", "cpSurfaces") + " - run backend/postprocess_case.py first")
+vtp = fs[-1]
+S = np.array(P.read_surface_file(vtp)[0], float); T = read_stl_vertices(os.path.join(case, "constant", "triSurface", "aircraft.stl"))
 S = S[abs(S[:, 1]-ym) < band]; T = T[abs(T[:, 1]-ym) < band]
 f = lambda P: ((P[:, 0]-x0)/c, (P[:, 2]-(z0+z1)/2)/c)
 (sx, sz), (tx, tz) = f(S), f(T)
