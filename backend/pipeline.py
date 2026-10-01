@@ -172,26 +172,34 @@ def parse_yplus(text):
     return dict(min=float(m.group(1)), max=float(m.group(2)), avg=float(m.group(3))) if m else None
 
 def read_vtk_points_scalar(text):
-    """Minimal legacy-ASCII VTK reader: returns (points, values) for POINT_DATA scalars, or None."""
+    """Minimal legacy-ASCII VTK reader: (points, values) of the first scalar in POINT_DATA (SCALARS or FIELD layout), else None."""
     tk = text.split()
     try:
         i = tk.index("POINTS"); n = int(tk[i+1]); c = [float(x) for x in tk[i+3:i+3+3*n]]
-        j = tk.index("POINT_DATA", i); k = tk.index("SCALARS", j); s = k+4
-        if tk[s] == "LOOKUP_TABLE": s += 2
-        v = [float(x) for x in tk[s:s+n]]
+        s = tk.index("POINT_DATA", i)+2; v = None
+        if tk[s] == "SCALARS":
+            s += 4
+            if tk[s] == "LOOKUP_TABLE": s += 2
+            v = [float(x) for x in tk[s:s+n]]
+        elif tk[s] == "FIELD":
+            k = int(tk[s+2]); s += 3
+            for _ in range(k):
+                nc, nt = int(tk[s+1]), int(tk[s+2]); s += 4
+                if nc == 1: v = [float(x) for x in tk[s:s+nt]]; break
+                s += nc*nt
     except (ValueError, IndexError): return None
-    if len(c) != 3*n or len(v) != n: return None
+    if v is None or len(c) != 3*n or len(v) != n: return None
     return [(c[3*a], c[3*a+1], c[3*a+2]) for a in range(n)], v
 
 def postprocess_cp(case, out_png, V, bbox):
     """Surface pressure at mid-span -> Cp plot. Never raises: returns dict or None (with reason)."""
     try:
-        _w(case, "system/cpSurfaces", "dictionary", "cpSurfaces", 'type surfaces; libs ("libsampling.so"); writeControl writeTime; interpolationScheme cell; surfaceFormat vtk; fields (p);\nsurfaces { aircraft { type patch; patches ("aircraft.*"); interpolate true; } }\n')
-        of_run(case, "simpleFoam -postProcess -dict system/cpSurfaces -latestTime", "log.cpSurfaces")
+        _w(case, "system/cpSurfaces", "dictionary", "cpSurfaces", 'type surfaces; libs ("libsampling.so"); writeControl writeTime; interpolationScheme cellPoint; surfaceFormat vtk; fields (p);\nsurfaces ( aircraft { type patch; patches ("aircraft.*"); interpolate true; } );\n')
+        of_run(case, "simpleFoam -postProcess -func cpSurfaces -latestTime", "log.cpSurfaces")
         fs = sorted(glob.glob(os.path.join(case, "postProcessing", "**", "*.vtk"), recursive=True))
         if not fs: return dict(error="no surface output written (see log.cpSurfaces)")
         with open(fs[-1]) as fh: r = read_vtk_points_scalar(fh.read())
-        if r is None: return dict(error="could not read surface VTK (see log.cpSurfaces)")
+        if r is None: return dict(error="could not read surface file " + os.path.relpath(fs[-1], case) + " (unknown layout)")
         pts, vals = r; x0, y0, z0, x1, y1, z1 = bbox; c = x1-x0; ym = (y0+y1)/2; zm = (z0+z1)/2; band = 0.05*(y1-y0)
         sel = [(((p[0]-x0)/c), v/(0.5*V*V), p[2] >= zm) for p, v in zip(pts, vals) if abs(p[1]-ym) < band]
         if not sel: return dict(error="no surface points near mid-span")
