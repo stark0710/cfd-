@@ -191,15 +191,34 @@ def read_vtk_points_scalar(text):
     if v is None or len(c) != 3*n or len(v) != n: return None
     return [(c[3*a], c[3*a+1], c[3*a+2]) for a in range(n)], v
 
+def read_surface_file(path):
+    """Read a sampled surface written by OpenFOAM (.vtp XML or legacy .vtk), ASCII data only. Raises ValueError with the reason."""
+    with open(path, "rb") as fh: raw = fh.read().decode("latin1")
+    if path.endswith(".vtp"):
+        import xml.etree.ElementTree as ET
+        try: root = ET.fromstring(raw)
+        except ET.ParseError: raise ValueError("VTP is not plain XML (binary appended data): ascii output is required")
+        pc = root.find(".//Piece"); pa = pc.find("Points/DataArray") if pc is not None else None
+        sc = [a for a in (pc.findall("PointData/DataArray") if pc is not None else []) if int(a.get("NumberOfComponents", "1")) == 1]
+        if pa is None or not sc: raise ValueError("VTP has no points or no scalar point data")
+        for a in (pa, sc[0]):
+            if a.get("format", "ascii") != "ascii": raise ValueError("VTP data format is '%s'; ascii is required" % a.get("format"))
+        c = [float(x) for x in pa.text.split()]; v = [float(x) for x in sc[0].text.split()]; n = len(c)//3
+        if len(v) != n: raise ValueError("VTP point and value counts differ")
+        return [(c[3*i], c[3*i+1], c[3*i+2]) for i in range(n)], v
+    r = read_vtk_points_scalar(raw)
+    if r is None: raise ValueError("unknown legacy VTK layout")
+    return r
+
 def postprocess_cp(case, out_png, V, bbox):
     """Surface pressure at mid-span -> Cp plot. Never raises: returns dict or None (with reason)."""
     try:
-        _w(case, "system/cpSurfaces", "dictionary", "cpSurfaces", 'type surfaces; libs ("libsampling.so"); writeControl writeTime; interpolationScheme cellPoint; surfaceFormat vtk; fields (p);\nsurfaces ( aircraft { type patch; patches ("aircraft.*"); interpolate true; } );\n')
+        _w(case, "system/cpSurfaces", "dictionary", "cpSurfaces", 'type surfaces; libs ("libsampling.so"); writeControl writeTime; interpolationScheme cellPoint; surfaceFormat vtk; formatOptions { vtk { legacy true; format ascii; } } fields (p);\nsurfaces ( aircraft { type patch; patches ("aircraft.*"); interpolate true; } );\n')
         of_run(case, "simpleFoam -postProcess -func cpSurfaces -latestTime", "log.cpSurfaces")
-        fs = sorted(glob.glob(os.path.join(case, "postProcessing", "**", "*.vtk"), recursive=True))
+        fs = sorted(glob.glob(os.path.join(case, "postProcessing", "cpSurfaces", "*", "*.vt[kp]")), key=lambda f: (float(os.path.basename(os.path.dirname(f))), os.path.getmtime(f)))
         if not fs: return dict(error="no surface output written (see log.cpSurfaces)")
-        with open(fs[-1]) as fh: r = read_vtk_points_scalar(fh.read())
-        if r is None: return dict(error="could not read surface file " + os.path.relpath(fs[-1], case) + " (unknown layout)")
+        try: r = read_surface_file(fs[-1])
+        except ValueError as e: return dict(error=f"{os.path.relpath(fs[-1], case)}: {e}")
         pts, vals = r; x0, y0, z0, x1, y1, z1 = bbox; c = x1-x0; ym = (y0+y1)/2; zm = (z0+z1)/2; band = 0.05*(y1-y0)
         sel = [(((p[0]-x0)/c), v/(0.5*V*V), p[2] >= zm) for p, v in zip(pts, vals) if abs(p[1]-ym) < band]
         if not sel: return dict(error="no surface points near mid-span")
