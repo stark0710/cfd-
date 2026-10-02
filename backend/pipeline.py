@@ -9,6 +9,8 @@ IMAGE = os.environ.get("OPENFOAM_IMAGE", "opencfd/openfoam-default:2312")
 BASHRC = os.environ.get("OPENFOAM_BASHRC", "/usr/lib/openfoam/openfoam2312/etc/bashrc")
 MESH_LEVELS = os.environ.get("MESH_LEVELS")                  # e.g. "5 5"; unset = auto from chord proxy
 END_TIME = int(os.environ.get("END_TIME", "600"))
+WAKE_BOX = os.environ.get("WAKE_BOX", "0") == "1"
+WAKE_LEVEL = os.environ.get("WAKE_LEVEL")
 LAYERS = int(os.environ.get("LAYERS", "4"))                 # prism layers (0 = off)
 Y_PLUS_TARGET = float(os.environ.get("Y_PLUS", "50"))       # target wall y+ used to size the first layer (wall functions)
 LAYER_EXPANSION = float(os.environ.get("LAYER_EXPANSION", "1.3"))
@@ -88,6 +90,13 @@ def write_case(case, info, atm):
     chord = sorted([x1-x0, y1-y0, z1-z0])[1]                    # chord proxy = middle bounding-box dimension (assumption)
     n_lv = max(3, min(7, math.floor(math.log2(h*40/chord)))) if MESH_LEVELS is None else None
     levels = MESH_LEVELS if MESH_LEVELS else f"{n_lv} {n_lv}"; cell = h/2**int(levels.split()[-1])
+    wb = None; gbox = rreg = ""
+    if WAKE_BOX:
+        wl = int(WAKE_LEVEL) if WAKE_LEVEL else max(2, int(levels.split()[0]) - 1)
+        zc = (z0+z1)/2; bmin = (x0-0.25*chord, y0-0.5*chord, zc-0.75*chord); bmax = (x1+3*chord, y1+0.5*chord, zc+0.75*chord)
+        gbox = "wakebox { type searchableBox; min (%g %g %g); max (%g %g %g); }" % (bmin + bmax)
+        rreg = "wakebox { mode inside; levels ((1e15 %d)); }" % wl
+        wb = dict(level=wl, min_m=bmin, max_m=bmax, cell_m=h/2**wl)
     nu = atm["nu"]; Rex = V*chord/2/nu; utau = V*math.sqrt(0.0576*Rex**-0.2/2)          # flat-plate estimate at mid-chord (assumption)
     y1 = 2*Y_PLUS_TARGET*nu/utau; er = LAYER_EXPANSION
     lay = dict(n=LAYERS, first_m=y1, expansion=er, total_m=y1*(er**LAYERS-1)/(er-1) if LAYERS else 0.0, target_yplus=Y_PLUS_TARGET)
@@ -100,18 +109,18 @@ boundary ( farfield { type patch; faces ( (0 3 2 1) (4 5 6 7) (0 1 5 4) (3 7 6 2
 mergePatchPairs ();
 """, x0=dom[0], y0=dom[1], z0=dom[2], x1=dom[3], y1=dom[4], z1=dom[5], nx=n[0], ny=n[1], nz=n[2])
     _w(case, "system/snappyHexMeshDict", "dictionary", "snappyHexMeshDict", """castellatedMesh true; snap true; addLayers $addl;
-geometry { aircraft.stl { type triSurfaceMesh; name aircraft; } }
+geometry { aircraft.stl { type triSurfaceMesh; name aircraft; } $gbox }
 castellatedMeshControls { maxLocalCells 1000000; maxGlobalCells 3000000; minRefinementCells 10; maxLoadUnbalance 0.10; nCellsBetweenLevels 3; features ();
   refinementSurfaces { aircraft { level ($lv); patchInfo { type wall; } } }
-  resolveFeatureAngle $rfa; refinementRegions {} locationInMesh ($lx $ly $lz); allowFreeStandingZoneFaces true; }
+  resolveFeatureAngle $rfa; refinementRegions { $rreg } locationInMesh ($lx $ly $lz); allowFreeStandingZoneFaces true; }
 snapControls { nSmoothPatch 3; tolerance 2.0; nSolveIter 50; nRelaxIter 5; nFeatureSnapIter 10; implicitFeatureSnap false; explicitFeatureSnap false; multiRegionFeatureSnap false; }
 addLayersControls { relativeSizes false; layers { "aircraft.*" { nSurfaceLayers $nl; } } expansionRatio $er; firstLayerThickness $flt; minThickness $mint; nGrow 0; featureAngle 130; slipFeatureAngle 30; nRelaxIter 5;
   nSmoothSurfaceNormals 1; nSmoothNormals 3; nSmoothThickness 10; maxFaceThicknessRatio 0.5; maxThicknessToMedialRatio 0.3; minMedialAxisAngle 90; nBufferCellsNoExtrude 0; nLayerIter 50; nRelaxedIter 20; }
 meshQualityControls { maxNonOrtho 65; maxBoundarySkewness 20; maxInternalSkewness 4; maxConcave 80; minVol 1e-13; minTetQuality 1e-15; minArea -1; minTwist 0.02;
   minDeterminant 0.001; minFaceWeight 0.05; minVolRatio 0.01; minTriangleTwist -1; nSmoothScale 4; errorReduction 0.75;
-  relaxed { maxNonOrtho 70; minTetQuality -1e30; } }
+  relaxed { maxNonOrtho 70; minTetQuality 1e-30; } }
 mergeTolerance 1e-6; debug 0;
-""", lv=levels, rfa=RESOLVE_ANGLE, addl="true" if LAYERS else "false", nl=max(LAYERS, 1), er=er, flt=y1, mint=0.25*y1, lx=loc[0], ly=loc[1], lz=loc[2])
+""", lv=levels, gbox=gbox, rreg=rreg, rfa=RESOLVE_ANGLE, addl="true" if LAYERS else "false", nl=max(LAYERS, 1), er=er, flt=y1, mint=0.25*y1, lx=loc[0], ly=loc[1], lz=loc[2])
     _w(case, "system/controlDict", "dictionary", "controlDict", """application simpleFoam; startFrom startTime; startTime 0; stopAt endTime; endTime $et; deltaT 1;
 writeControl timeStep; writeInterval 100; purgeWrite 2; writeFormat ascii; writePrecision 8; timeFormat general; timePrecision 6; runTimeModifiable true;
 functions { forces { type forces; libs ("libforces.so"); patches ("aircraft.*"); rho rhoInf; rhoInf $rho; CofR (0 0 0); writeControl timeStep; writeInterval 1; } }
@@ -135,7 +144,7 @@ relaxationFactors { equations { U 0.9; ".*" 0.9; } }
     field("k", "[0 2 -2 0 0 0 0]", "%g" % k0, f"type freestream; freestreamValue uniform {k0:g};", f"type kqRWallFunction; value uniform {k0:g};")
     field("omega", "[0 0 -1 0 0 0 0]", "%g" % om0, f"type freestream; freestreamValue uniform {om0:g};", f"type omegaWallFunction; value uniform {om0:g};")
     field("nut", "[0 2 -1 0 0 0 0]", "0", "type freestream; freestreamValue uniform 0;", "type nutkWallFunction; value uniform 0;")
-    return dict(layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)
+    return dict(wake_box=wb, layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)
 
 # ---------- running OpenFOAM ----------
 def of_run(case, cmd, log, on_line=None):
