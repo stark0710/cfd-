@@ -1,6 +1,6 @@
 """Compare the surface the solver used (snapped mesh) with the true STL outline at mid-span.
 Usage: python backend/geometry_check.py runs/<id>     -> writes runs/<id>/geometry_midspan.png and prints nose/tail numbers.
-Self-contained (reads the binary .vtp itself); does not import pipeline.py."""
+Reads the newest sampled surface (.vtk or .vtp) written by backend/postprocess_case.py using pipeline.read_surface_file."""
 import base64, glob, json, os, re, struct, sys
 import xml.etree.ElementTree as ET
 import numpy as np
