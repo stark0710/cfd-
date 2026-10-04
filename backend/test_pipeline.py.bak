@@ -63,17 +63,6 @@ class T(unittest.TestCase):
     def test_layers_log(self):
         log = "Extruding 70234 out of 85730 faces (81.9%). Wrote mesh in 5 s.\npatch                          faces    layers avg thickness[m]\n                                         near-wall overall\n-----                          -----    ------ --------   -------\naircraft_aircraft              85730    3.2    0.00112    0.00381\n"
         r = P.parse_layers(log); self.assertAlmostEqual(r["coverage_pct"], 81.9); self.assertAlmostEqual(r["avg_layers"], 3.2); self.assertIsNone(P.parse_layers("nothing"))
-    def test_reference_area(self):
-        x0, x1, y0, y1, z0, z1 = 0.0, 0.2, -0.5, 0.5, -0.012, 0.012
-        P8 = [(x, y, z) for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]
-        f = os.path.join(self.d, "box.stl")
-        with open(f, "w") as fh:
-            fh.write("solid box\n")
-            for a, b, c, d in [(0,1,3,2), (4,6,7,5), (0,4,5,1), (2,3,7,6), (0,2,6,4), (1,5,7,3)]:
-                for tri in ((a, b, c), (a, c, d)): fh.write("facet normal 0 0 0\nouter loop\n" + "".join("vertex %g %g %g\n" % P8[i] for i in tri) + "endloop\nendfacet\n")
-            fh.write("endsolid box\n")
-        r = P.reference_geometry(f, (x0, y0, z0, x1, y1, z1)); self.assertAlmostEqual(r["area_m2"], 0.2, 6); self.assertAlmostEqual(r["span_m"], 1.0); self.assertAlmostEqual(r["mean_chord_m"], 0.2, 6)
-        self.assertIsNone(P.reference_geometry(os.path.join(self.d, "missing.stl"), (0, 0, 0, 1, 1, 1)))
     def test_forces(self):
         d = os.path.join(self.d, "fc", "postProcessing", "forces", "0"); os.makedirs(d)
         open(os.path.join(d, "force.dat"), "w").write("# Time (total_x total_y total_z) (pressure_x pressure_y pressure_z) (viscous_x viscous_y viscous_z)\n" + "".join(f"{i} ((1.0 0.0 10.0) (0.9 0 9.9) (0.1 0 0.1))\n" for i in range(1, 30)))

@@ -11,8 +11,6 @@ MESH_LEVELS = os.environ.get("MESH_LEVELS")                  # e.g. "5 5"; unset
 END_TIME = int(os.environ.get("END_TIME", "600"))
 WAKE_BOX = os.environ.get("WAKE_BOX", "0") == "1"
 WAKE_LEVEL = os.environ.get("WAKE_LEVEL")
-NOSE_BOX = os.environ.get("NOSE_BOX", "0") == "1"
-NOSE_LEVEL = os.environ.get("NOSE_LEVEL")
 LAYERS = int(os.environ.get("LAYERS", "4"))                 # prism layers (0 = off)
 Y_PLUS_TARGET = float(os.environ.get("Y_PLUS", "50"))       # target wall y+ used to size the first layer (wall functions)
 LAYER_EXPANSION = float(os.environ.get("LAYER_EXPANSION", "1.3"))
@@ -92,20 +90,13 @@ def write_case(case, info, atm):
     chord = sorted([x1-x0, y1-y0, z1-z0])[1]                    # chord proxy = middle bounding-box dimension (assumption)
     n_lv = max(3, min(7, math.floor(math.log2(h*40/chord)))) if MESH_LEVELS is None else None
     levels = MESH_LEVELS if MESH_LEVELS else f"{n_lv} {n_lv}"; cell = h/2**int(levels.split()[-1])
-    wb = None; nb = None; gbox = rreg = ""
+    wb = None; gbox = rreg = ""
     if WAKE_BOX:
         wl = int(WAKE_LEVEL) if WAKE_LEVEL else max(2, int(levels.split()[0]) - 1)
         zc = (z0+z1)/2; bmin = (x0-0.25*chord, y0-0.5*chord, zc-0.75*chord); bmax = (x1+3*chord, y1+0.5*chord, zc+0.75*chord)
         gbox = "wakebox { type searchableBox; min (%g %g %g); max (%g %g %g); }" % (bmin + bmax)
         rreg = "wakebox { mode inside; levels ((1e15 %d)); }" % wl
         wb = dict(level=wl, min_m=bmin, max_m=bmax, cell_m=h/2**wl)
-    if NOSE_BOX:
-        nose_level = int(NOSE_LEVEL) if NOSE_LEVEL else int(levels.split()[-1]) + 1
-        nose_min = (x0-0.01*chord, y0-0.005*chord, z0-0.01*chord)
-        nose_max = (x0+0.05*chord, y1+0.005*chord, z1+0.01*chord)
-        gbox += " nosebox { type searchableBox; min (%g %g %g); max (%g %g %g); }" % (nose_min + nose_max)
-        rreg += " nosebox { mode inside; levels ((1e15 %d)); }" % nose_level
-        nb = dict(level=nose_level, min_m=nose_min, max_m=nose_max, cell_m=h/2**nose_level)
     nu = atm["nu"]; Rex = V*chord/2/nu; utau = V*math.sqrt(0.0576*Rex**-0.2/2)          # flat-plate estimate at mid-chord (assumption)
     y1 = 2*Y_PLUS_TARGET*nu/utau; er = LAYER_EXPANSION
     lay = dict(n=LAYERS, first_m=y1, expansion=er, total_m=y1*(er**LAYERS-1)/(er-1) if LAYERS else 0.0, target_yplus=Y_PLUS_TARGET)
@@ -152,8 +143,8 @@ relaxationFactors { equations { U 0.9; ".*" 0.9; } }
     field("p", "[0 2 -2 0 0 0 0]", "0", "type freestreamPressure; freestreamValue uniform 0;", "type zeroGradient;")
     field("k", "[0 2 -2 0 0 0 0]", "%g" % k0, f"type freestream; freestreamValue uniform {k0:g};", f"type kqRWallFunction; value uniform {k0:g};")
     field("omega", "[0 0 -1 0 0 0 0]", "%g" % om0, f"type freestream; freestreamValue uniform {om0:g};", f"type omegaWallFunction; value uniform {om0:g};")
-    field("nut", "[0 2 -1 0 0 0 0]", "0", "type freestream; freestreamValue uniform 0;", "type " + os.environ.get("NUT_WALL", "nutkWallFunction") + "; value uniform 0;")
-    return dict(wake_box=wb, nose_box=nb, layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)
+    field("nut", "[0 2 -1 0 0 0 0]", "0", "type freestream; freestreamValue uniform 0;", "type nutkWallFunction; value uniform 0;")
+    return dict(wake_box=wb, layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)
 
 # ---------- running OpenFOAM ----------
 def of_run(case, cmd, log, on_line=None):
@@ -269,16 +260,6 @@ def postprocess_cp(case, out_png, V, bbox):
     except Exception as e: return dict(error=f"{type(e).__name__}: {e}")
 
 def dot(a, b): return sum(x*y for x, y in zip(a, b))
-def reference_geometry(stl_path, bbox):
-    """Planform reference area (projected on the x-y plane), span and mean chord from the STL. Returns None if it cannot be computed."""
-    try:
-        v = [tuple(float(x) for x in m.groups()) for m in re.finditer(r"vertex\s+(\S+)\s+(\S+)\s+(\S+)", open(stl_path).read())]
-        a2 = sum(abs((t[1][0]-t[0][0])*(t[2][1]-t[0][1]) - (t[1][1]-t[0][1])*(t[2][0]-t[0][0])) for t in (v[i:i+3] for i in range(0, len(v) - 2, 3)))
-        area = a2/4.0   # |cross| is twice the projected triangle area; a closed body is seen once from above and once from below
-        span = bbox[4] - bbox[1]
-        return dict(area_m2=area, span_m=span, mean_chord_m=area/span) if area > 0 and span > 0 else None
-    except Exception: return None
-
 def force_summary(rows, drag_dir, lift_dir):
     if not rows: return None
     D = [dot(r[1:4], drag_dir) for r in rows]; Lf = [dot(r[1:4], lift_dir) for r in rows]
@@ -290,7 +271,7 @@ def force_summary(rows, drag_dir, lift_dir):
 # ---------- main entry ----------
 def run_pipeline(step_path, workdir, emit):
     case = os.path.abspath(os.path.join(workdir, "case")); os.makedirs(os.path.join(case, "constant", "triSurface"), exist_ok=True)
-    res = dict(demo=False, status="failed", warnings=[], settings=dict(CASE, mesh_levels=MESH_LEVELS, end_time=END_TIME, solver=f"simpleFoam kOmegaSST, nut wall {os.environ.get('NUT_WALL', 'nutkWallFunction')} ({IMAGE})"))
+    res = dict(demo=False, status="failed", warnings=[], settings=dict(CASE, mesh_levels=MESH_LEVELS, end_time=END_TIME, solver=f"simpleFoam kOmegaSST ({IMAGE})"))
     stage = lambda i: emit(type="stage", i=i)
     try:
         stage(0); atm = isa(CASE["H"]); res["air"] = atm
@@ -325,8 +306,6 @@ def run_pipeline(step_path, workdir, emit):
         res["cp"] = postprocess_cp(case, os.path.join(workdir, "cp_midspan.png"), CASE["V"], info["bbox_m"])
         if not res["cp"] or res["cp"].get("error"): res["warnings"].append("Cp plot unavailable: " + str((res["cp"] or {}).get("error", "unknown")))
         fs = force_summary(parse_forces(case), meta["wind_dir"], meta["lift_dir"]); res["forces"] = fs
-        ref = reference_geometry(os.path.join(case, "constant", "triSurface", "aircraft.stl"), info["bbox_m"]); res["reference"] = ref
-        if fs and ref: qS = 0.5*atm["rho"]*CASE["V"]**2*ref["area_m2"]; fs["CL"] = fs["lift_N"]/qS; fs["CD"] = fs["drag_N"]/qS
         if fs is None: res["warnings"].append("Force output not found: lift/drag unavailable.")
         else:
             if (fs["lift_drift"] is None or fs["lift_drift"] > 0.02) or (fs["drag_drift"] is None or fs["drag_drift"] > 0.02):
@@ -334,7 +313,7 @@ def run_pipeline(step_path, workdir, emit):
         if fs and CASE["alpha"] >= 2 and fs["lift_N"] < 0: res["warnings"].append("Lift is NEGATIVE at positive angle of attack, which is physically unexpected: treat these forces as wrong (check mesh, convergence, orientation).")
         if not rp.converged: res["warnings"].append(f"Residual targets not met within {END_TIME} iterations.")
         res["warnings"] += ["Wall-function mesh, not validated: treat drag and lift as unreliable until checked against reference data." + ("" if LAYERS else " No prism layers."), "Not validated against reference data yet.",
-                            (f"CL and CD use the projected planform area S = {ref['area_m2']:.4g} m2 and mean chord {ref['mean_chord_m']:.4g} m, both computed from the geometry (for a full aircraft S includes the fuselage)." if ref else "Force coefficients unavailable: the reference area could not be computed from the geometry. Forces are in Newtons."),
+                            "Force coefficients unavailable: reference area/length are not defined for this geometry. Forces are in Newtons.",
                             "Velocity field plots are not produced by v1; surface Cp at mid-span is (cp_midspan.png). Full fields are in the case folder."]
         res["status"] = "completed_with_warnings"
     except PipelineError as e:
@@ -356,5 +335,5 @@ def make_report(r):
           "", "## Geometry", f"- Solids {g.get('solids', 'n/a')}, faces {g.get('faces', 'n/a')}, size {fmt(g.get('length_scale_m'), 'm')}, wetted area {fmt(g.get('wetted_area_m2'), 'm2')}",
           "", "## Mesh", f"- Prism layers: " + (("requested %d, first layer %.2f mm, expansion %.2f, %s of surface faces extruded" % (r["layers"]["n"], r["layers"]["first_m"]*1000, r["layers"]["expansion"], ("%.0f%%" % r["layers"]["coverage_pct"]) if "coverage_pct" in r["layers"] else "coverage unknown")) if r.get("layers") and r["layers"]["n"] else "none"), f"- y+ (wall): {('avg %.3g, max %.3g' % (r['yplus']['avg'], r['yplus']['max'])) if r.get('yplus') else 'unavailable'}", f"- Cells {m.get('cells', 'unavailable')}, max non-orthogonality {fmt(m.get('max_non_orthogonality'))}, max skewness {fmt(m.get('max_skewness'))}, checkMesh OK: {m.get('mesh_ok', 'unavailable')}",
           "", "## Results (calculated by the solver)", f"- Lift {fmt(f.get('lift_N'), 'N')}, drag {fmt(f.get('drag_N'), 'N')}, L/D {fmt(f.get('lift_to_drag'))}", f"- Mid-span Cp: " + (("min %.3g at x/c=%.3f; plot %s" % (r["cp"]["cp_min"], r["cp"]["cp_min_x_over_c"], r["cp"].get("png") or "not drawn")) if r.get("cp") and "cp_min" in r["cp"] else "unavailable"), f"- Drag split: pressure {fmt(f.get('pressure_drag_N'), 'N')}, viscous {fmt(f.get('viscous_drag_N'), 'N')}",
-          (("- CL %.4f, CD %.4f (S = %.4g m2, mean chord %.4g m)" % (f["CL"], f["CD"], r["reference"]["area_m2"], r["reference"]["mean_chord_m"])) if f.get("CL") is not None and r.get("reference") else "- CL, CD: unavailable (no reference area/length defined)"), f"- Residual targets met: {r.get('residual_criteria_met', 'unavailable')} (iterations run: {r.get('iterations', 'n/a')}). This alone does not prove convergence or accuracy.", "", "## Warnings and assumptions"]
+          "- CL, CD: unavailable (no reference area/length defined)", f"- Residual targets met: {r.get('residual_criteria_met', 'unavailable')} (iterations run: {r.get('iterations', 'n/a')}). This alone does not prove convergence or accuracy.", "", "## Warnings and assumptions"]
     return "\n".join(L + [f"- {w}" for w in r["warnings"]] + [""])

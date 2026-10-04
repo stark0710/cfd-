@@ -1,0 +1,106 @@
+[1mdiff --git a/.claude/agents/claude.agent.md b/.claude/agents/claude.agent.md[m
+[1mnew file mode 100644[m
+[1mindex 0000000..dcb3831[m
+[1m--- /dev/null[m
+[1m+++ b/.claude/agents/claude.agent.md[m
+[36m@@ -0,0 +1,9 @@[m
+[32m+[m[32m---[m
+[32m+[m[32mname: claude[m
+[32m+[m[32mdescription: Describe what this custom agent does and when to use it.[m
+[32m+[m[32mtools: Read, Grep, Glob, Bash # specify the tools this agent can use. If not set, all enabled tools are allowed.[m
+[32m+[m[32m---[m
+[32m+[m
+[32m+[m[32m<!-- Tip: Use /create-agent in chat to generate content with agent assistance -->[m
+[32m+[m
+[32m+[m[32mDefine what this custom agent does, including its behavior, capabilities, and any specific instructions for its operation.[m
+\ No newline at end of file[m
+[1mdiff --git a/add_nose_box.py b/add_nose_box.py[m
+[1mnew file mode 100644[m
+[1mindex 0000000..e69de29[m
+[1mdiff --git a/add_wake_box.py b/add_wake_box.py[m
+[1mnew file mode 100644[m
+[1mindex 0000000..9ae77f5[m
+[1m--- /dev/null[m
+[1m+++ b/add_wake_box.py[m
+[36m@@ -0,0 +1,22 @@[m
+[32m+[m[32mimport sys[m
+[32m+[m[32mp = sys.argv[1]; s = open(p).read()[m
+[32m+[m[32mdef rep(a, b):[m
+[32m+[m[32m    global s[m
+[32m+[m[32m    assert s.count(a) == 1, "pattern not found exactly once: " + a[:60][m
+[32m+[m[32m    s = s.replace(a, b)[m
+[32m+[m[32mrep('END_TIME = int(os.environ.get("END_TIME", "600"))',[m
+[32m+[m[32m    'END_TIME = int(os.environ.get("END_TIME", "600"))\nWAKE_BOX = os.environ.get("WAKE_BOX", "0") == "1"\nWAKE_LEVEL = os.environ.get("WAKE_LEVEL")')[m
+[32m+[m[32mrep('    nu = atm["nu"]; Rex = V*chord/2/nu;',[m
+[32m+[m[32m'''    wb = None; gbox = rreg = ""[m
+[32m+[m[32m    if WAKE_BOX:[m
+[32m+[m[32m        wl = int(WAKE_LEVEL) if WAKE_LEVEL else max(2, int(levels.split()[0]) - 1)[m
+[32m+[m[32m        zc = (z0+z1)/2; bmin = (x0-0.25*chord, y0-0.5*chord, zc-0.75*chord); bmax = (x1+3*chord, y1+0.5*chord, zc+0.75*chord)[m
+[32m+[m[32m        gbox = "wakebox { type searchableBox; min (%g %g %g); max (%g %g %g); }" % (bmin + bmax)[m
+[32m+[m[32m        rreg = "wakebox { mode inside; levels ((1e15 %d)); }" % wl[m
+[32m+[m[32m        wb = dict(level=wl, min_m=bmin, max_m=bmax, cell_m=h/2**wl)[m
+[32m+[m[32m    nu = atm["nu"]; Rex = V*chord/2/nu;''')[m
+[32m+[m[32mrep('geometry { aircraft.stl { type triSurfaceMesh; name aircraft; } }', 'geometry { aircraft.stl { type triSurfaceMesh; name aircraft; } $gbox }')[m
+[32m+[m[32mrep('refinementRegions {} locationInMesh', 'refinementRegions { $rreg } locationInMesh')[m
+[32m+[m[32mrep('lv=levels, rfa=RESOLVE_ANGLE,', 'lv=levels, gbox=gbox, rreg=rreg, rfa=RESOLVE_ANGLE,')[m
+[32m+[m[32mrep('return dict(layers=lay, levels=levels,', 'return dict(wake_box=wb, layers=lay, levels=levels,')[m
+[32m+[m[32mopen(p, "w").write(s); print("patched", p)[m
+[1mdiff --git a/backend/pipeline.py b/backend/pipeline.py[m
+[1mindex af2fa80..8c00a8f 100644[m
+[1m--- a/backend/pipeline.py[m
+[1m+++ b/backend/pipeline.py[m
+[36m@@ -9,6 +9,8 @@[m [mIMAGE = os.environ.get("OPENFOAM_IMAGE", "opencfd/openfoam-default:2312")[m
+ BASHRC = os.environ.get("OPENFOAM_BASHRC", "/usr/lib/openfoam/openfoam2312/etc/bashrc")[m
+ MESH_LEVELS = os.environ.get("MESH_LEVELS")                  # e.g. "5 5"; unset = auto from chord proxy[m
+ END_TIME = int(os.environ.get("END_TIME", "600"))[m
+[32m+[m[32mWAKE_BOX = os.environ.get("WAKE_BOX", "0") == "1"[m
+[32m+[m[32mWAKE_LEVEL = os.environ.get("WAKE_LEVEL")[m
+ LAYERS = int(os.environ.get("LAYERS", "4"))                 # prism layers (0 = off)[m
+ Y_PLUS_TARGET = float(os.environ.get("Y_PLUS", "50"))       # target wall y+ used to size the first layer (wall functions)[m
+ LAYER_EXPANSION = float(os.environ.get("LAYER_EXPANSION", "1.3"))[m
+[36m@@ -88,6 +90,13 @@[m [mdef write_case(case, info, atm):[m
+     chord = sorted([x1-x0, y1-y0, z1-z0])[1]                    # chord proxy = middle bounding-box dimension (assumption)[m
+     n_lv = max(3, min(7, math.floor(math.log2(h*40/chord)))) if MESH_LEVELS is None else None[m
+     levels = MESH_LEVELS if MESH_LEVELS else f"{n_lv} {n_lv}"; cell = h/2**int(levels.split()[-1])[m
+[32m+[m[32m    wb = None; gbox = rreg = ""[m
+[32m+[m[32m    if WAKE_BOX:[m
+[32m+[m[32m        wl = int(WAKE_LEVEL) if WAKE_LEVEL else max(2, int(levels.split()[0]) - 1)[m
+[32m+[m[32m        zc = (z0+z1)/2; bmin = (x0-0.25*chord, y0-0.5*chord, zc-0.75*chord); bmax = (x1+3*chord, y1+0.5*chord, zc+0.75*chord)[m
+[32m+[m[32m        gbox = "wakebox { type searchableBox; min (%g %g %g); max (%g %g %g); }" % (bmin + bmax)[m
+[32m+[m[32m        rreg = "wakebox { mode inside; levels ((1e15 %d)); }" % wl[m
+[32m+[m[32m        wb = dict(level=wl, min_m=bmin, max_m=bmax, cell_m=h/2**wl)[m
+     nu = atm["nu"]; Rex = V*chord/2/nu; utau = V*math.sqrt(0.0576*Rex**-0.2/2)          # flat-plate estimate at mid-chord (assumption)[m
+     y1 = 2*Y_PLUS_TARGET*nu/utau; er = LAYER_EXPANSION[m
+     lay = dict(n=LAYERS, first_m=y1, expansion=er, total_m=y1*(er**LAYERS-1)/(er-1) if LAYERS else 0.0, target_yplus=Y_PLUS_TARGET)[m
+[36m@@ -100,18 +109,18 @@[m [mboundary ( farfield { type patch; faces ( (0 3 2 1) (4 5 6 7) (0 1 5 4) (3 7 6 2[m
+ mergePatchPairs ();[m
+ """, x0=dom[0], y0=dom[1], z0=dom[2], x1=dom[3], y1=dom[4], z1=dom[5], nx=n[0], ny=n[1], nz=n[2])[m
+     _w(case, "system/snappyHexMeshDict", "dictionary", "snappyHexMeshDict", """castellatedMesh true; snap true; addLayers $addl;[m
+[31m-geometry { aircraft.stl { type triSurfaceMesh; name aircraft; } }[m
+[32m+[m[32mgeometry { aircraft.stl { type triSurfaceMesh; name aircraft; } $gbox }[m
+ castellatedMeshControls { maxLocalCells 1000000; maxGlobalCells 3000000; minRefinementCells 10; maxLoadUnbalance 0.10; nCellsBetweenLevels 3; features ();[m
+   refinementSurfaces { aircraft { level ($lv); patchInfo { type wall; } } }[m
+[31m-  resolveFeatureAngle $rfa; refinementRegions {} locationInMesh ($lx $ly $lz); allowFreeStandingZoneFaces true; }[m
+[32m+[m[32m  resolveFeatureAngle $rfa; refinementRegions { $rreg } locationInMesh ($lx $ly $lz); allowFreeStandingZoneFaces true; }[m
+ snapControls { nSmoothPatch 3; tolerance 2.0; nSolveIter 50; nRelaxIter 5; nFeatureSnapIter 10; implicitFeatureSnap false; explicitFeatureSnap false; multiRegionFeatureSnap false; }[m
+ addLayersControls { relativeSizes false; layers { "aircraft.*" { nSurfaceLayers $nl; } } expansionRatio $er; firstLayerThickness $flt; minThickness $mint; nGrow 0; featureAngle 130; slipFeatureAngle 30; nRelaxIter 5;[m
+   nSmoothSurfaceNormals 1; nSmoothNormals 3; nSmoothThickness 10; maxFaceThicknessRatio 0.5; maxThicknessToMedialRatio 0.3; minMedialAxisAngle 90; nBufferCellsNoExtrude 0; nLayerIter 50; nRelaxedIter 20; }[m
+ meshQualityControls { maxNonOrtho 65; maxBoundarySkewness 20; maxInternalSkewness 4; maxConcave 80; minVol 1e-13; minTetQuality 1e-15; minArea -1; minTwist 0.02;[m
+   minDeterminant 0.001; minFaceWeight 0.05; minVolRatio 0.01; minTriangleTwist -1; nSmoothScale 4; errorReduction 0.75;[m
+[31m-  relaxed { maxNonOrtho 70; minTetQuality -1e30; } }[m
+[32m+[m[32m  relaxed { maxNonOrtho 70; minTetQuality 1e-30; } }[m
+ mergeTolerance 1e-6; debug 0;[m
+[31m-""", lv=levels, rfa=RESOLVE_ANGLE, addl="true" if LAYERS else "false", nl=max(LAYERS, 1), er=er, flt=y1, mint=0.25*y1, lx=loc[0], ly=loc[1], lz=loc[2])[m
+[32m+[m[32m""", lv=levels, gbox=gbox, rreg=rreg, rfa=RESOLVE_ANGLE, addl="true" if LAYERS else "false", nl=max(LAYERS, 1), er=er, flt=y1, mint=0.25*y1, lx=loc[0], ly=loc[1], lz=loc[2])[m
+     _w(case, "system/controlDict", "dictionary", "controlDict", """application simpleFoam; startFrom startTime; startTime 0; stopAt endTime; endTime $et; deltaT 1;[m
+ writeControl timeStep; writeInterval 100; purgeWrite 2; writeFormat ascii; writePrecision 8; timeFormat general; timePrecision 6; runTimeModifiable true;[m
+ functions { forces { type forces; libs ("libforces.so"); patches ("aircraft.*"); rho rhoInf; rhoInf $rho; CofR (0 0 0); writeControl timeStep; writeInterval 1; } }[m
+[36m@@ -135,7 +144,7 @@[m [mrelaxationFactors { equations { U 0.9; ".*" 0.9; } }[m
+     field("k", "[0 2 -2 0 0 0 0]", "%g" % k0, f"type freestream; freestreamValue uniform {k0:g};", f"type kqRWallFunction; value uniform {k0:g};")[m
+     field("omega", "[0 0 -1 0 0 0 0]", "%g" % om0, f"type freestream; freestreamValue uniform {om0:g};", f"type omegaWallFunction; value uniform {om0:g};")[m
+     field("nut", "[0 2 -1 0 0 0 0]", "0", "type freestream; freestreamValue uniform 0;", "type nutkWallFunction; value uniform 0;")[m
+[31m-    return dict(layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)[m
+[32m+[m[32m    return dict(wake_box=wb, layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)[m
+ [m
+ # ---------- running OpenFOAM ----------[m
+ def of_run(case, cmd, log, on_line=None):[m
