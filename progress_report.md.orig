@@ -1,0 +1,130 @@
+# TorqWings CFD Agent - Progress Report
+
+*4 Oct 2026 | repo `stark0710/cfd-` | GitHub Codespaces*
+
+## 1. Goal
+
+Upload a STEP file of a fixed-wing UAV, build a mesh, run OpenFOAM, and report lift and drag for one fixed case: 25 m/s, sea level, 4 degrees angle of attack.
+
+**Accuracy rule:** never show demo values as real results, and never claim accuracy that has not been checked.
+
+## 2. Current status
+
+| Part | Status |
+| --- | --- |
+| STEP to watertight surface (Gmsh) | Working |
+| Mesh (snappyHexMesh), prism layers, checkMesh gate | Working; valid wake-only mesh with 3 layers and expansion 1.2 |
+| Solver (simpleFoam, kOmegaSST) | Working for the mesh-valid wake-only baseline; the accepted y+ = 60 case has not yet reached the residual target at 1200 iterations |
+| Lift, drag, y+, mid-span Cp, report | Working, but the current force output is still provisional because residual targets are not met |
+| Wake refinement box | Validated as stable on the accepted baseline |
+| Nose refinement box | Rejected; aggressive refinement caused invalid cells and broken mesh quality |
+| Wall-layer sensitivity study | Completed: y+ = 30 is invalid for wall functions, y+ = 60 is the accepted case |
+| Convergence check | Ongoing: longer 1200-iteration rerun showed the same force values but residual targets remained false |
+| Web UI | Demo only; not connected to live backend results |
+
+Test geometry: symmetric NACA0012 wing, 0.2 m chord, 1 m span.
+
+## 3. Current working baseline
+
+The accepted working baseline remains the wake-only case with y+ target of 60:
+
+- Command: `Y_PLUS=60 WAKE_BOX=1 WAKE_LEVEL=4 NOSE_BOX=0 LAYERS=3 LAYER_EXPANSION=1.2 MESH_LEVELS='5 7' END_TIME=600 python backend/run_local.py test_wing.step runs/yplus-60`
+- Mesh: 1,060,448 cells
+- checkMesh: OK=True
+- Max non-orthogonality: 64.92
+- Max skewness: 1.789
+- Average y+: 39.4
+- Max y+: 99.3
+- Lift: 19.42 N
+- Drag: 1.459 N
+- L/D: 13.31
+- Status: completed_with_warnings
+
+A longer convergence check was run with the same geometry and wall treatment at 1200 iterations:
+
+- Command: `Y_PLUS=60 WAKE_BOX=1 WAKE_LEVEL=4 NOSE_BOX=0 LAYERS=3 LAYER_EXPANSION=1.2 MESH_LEVELS='5 7' END_TIME=1200 python backend/run_local.py test_wing.step runs/yplus-60-long`
+- Mesh: unchanged; checkMesh remained OK
+- Same force levels were reproduced: Lift 19.42 N, Drag 1.459 N, L/D 13.31
+- Residual targets met: False (iterations run: 1200)
+
+Using the wing planform reference area $S = 0.2\,m^2$ (0.2 m chord by 1 m span), the reported 1200-iteration forces correspond retrospectively to $C_L \approx 0.254$ and $C_D \approx 0.0191$ at 25 m/s and density 1.225 kg/m3. These coefficients were calculated from the reported forces; they were not present in the generated run report. This remains provisional: residual targets were not met, and the case has not been validated against experimental data.
+
+The y+ = 60 setup is the current wall-function baseline because it passes `checkMesh` and has average y+ in the usual wall-function range. It is not yet a fully converged or externally validated solution.
+
+## 4. Invalid y+ = 30 case
+
+The lower wall-layer case was tested but is not accepted:
+
+- Command: `Y_PLUS=30 WAKE_BOX=1 WAKE_LEVEL=4 NOSE_BOX=0 LAYERS=3 LAYER_EXPANSION=1.2 MESH_LEVELS='5 7' END_TIME=600 python backend/run_local.py test_wing.step runs/yplus-30`
+- Average y+: 22.3
+- Max y+: 52.4
+- checkMesh: OK=True
+- Lift: 19.62 N
+- Drag: 1.35 N
+- Assessment: invalid for wall functions because the average y+ is below the recommended 30-300 range
+
+This case was not used for the final answer. It showed that wall-treatment sensitivity matters, but it was not a valid wall-function result.
+
+## 5. Failed nose-box experiment
+
+The nose refinement case failed before solving:
+
+- Command: `NOSE_BOX=1 NOSE_LEVEL=8 WAKE_BOX=1 WAKE_LEVEL=4 Y_PLUS=40 LAYERS=3 LAYER_EXPANSION=1.2 MESH_LEVELS='5 7' END_TIME=600 python backend/run_local.py test_wing.step runs/nose-5-7`
+- Result: mesh failed at checkMesh
+- Negative-volume cells: 937
+- Max non-orthogonality: 179.98939
+- Max skewness: 18725.4
+- Failed mesh checks: 5
+
+This is direct evidence that the nose refinement box was too aggressive for the current geometry and refinement strategy. It was not a solver problem; it was a mesh-quality failure.
+
+## 6. What the evidence shows
+
+- The wake-only baseline is the valid reference because it passed `checkMesh`.
+- The aggressive nose-box case is invalid and was discarded.
+- The y+ study shows that y+ = 30 is below the wall-function operating range, while y+ = 60 is acceptable.
+- The accepted final result for the current setup is the y+ = 60 case with lift 19.42 N and drag 1.459 N.
+- The mesh and wall treatment are acceptable for this setup, but force values remain provisional because residual targets were not met and external validation is incomplete.
+
+## 7. Recommended next steps
+
+1. Keep the y+ = 60 case as the working baseline because it is mesh-valid and in the correct wall-function band.
+2. Do not use the y+ = 30 case in the final answer.
+3. Do not continue with aggressive nose refinement; the nose-box cases were invalid and should be considered a failed mesh strategy.
+4. Treat the remaining problem as convergence/validation, not geometry tuning: the accepted case still shows residual targets not met even after 1200 iterations.
+5. Fix the reference-area reporting layer so that CL and CD can be computed from the valid force result.
+6. Validate results against published NACA0012 data only after the solver is demonstrably converged and the reference area is defined consistently.
+
+## 8. Honest conclusion
+
+The current accepted CFD baseline is the wake-only y+ = 60 case. It is mesh-valid and in the normal wall-function range, but the solver is not yet converged to the residual targets at 1200 iterations. That means the result is useful as a control case and as evidence for the wall-sensitive setup, but it is not a fully validated final aerodynamic answer yet. The previous y+ = 30 case was below the recommended wall-function band and should not be used as a final answer. The nose-box refinement remains a failed strategy and should not be pursued without a much smaller, quality-controlled redesign. The immediate next task is to continue the convergence study and then compute CL and CD from the valid force output using a defined reference area and chord.
+
+## Appendix: Consolidated test history
+
+The following inventory combines the recorded run notes in the supplied report with the later y+ = 60 and nose-box checks. The older mesh-study cases are distinct from the later wall-layer tests; keep their different outputs separate. Original logs/case folders for every historical run are not available here, so older entries are transcribed from the recorded report.
+
+| Test | Mesh / setup | Cells | Layer coverage | Lift (N) | Drag (N) | Outcome |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Initial 4-layer run | Early mesh | 663,777 | 42% | 19.09 | 1.397 | Not converged; incomplete prism coverage |
+| No-layer control | No prism layers | 559,619 | None | 8.86 | 2.129 | Poor control result |
+| Earlier y+ = 30 | 3 layers | 806,253 | 100% | 19.69 | 1.366 | Converged in 187 iterations; distinct from later y+ = 30 test |
+| Earlier y+ = 40 baseline | Mesh 5 7, 3 layers | 806,197 | 100% | 19.40 | 1.361 | Converged in 197 iterations; about 13 min |
+| Wake + tip refinement | y+ = 40, mesh 5 7 | 1,060,677 | 99.9% | 19.31 | 1.345 | Converged in 181 iterations; about 17 min |
+| Finer surface mesh | Mesh 6 7 | 980,608 | 99.9% | 19.60 | 1.384 | Converged in 189 iterations; about 15 min |
+| Edge-only refinement | Mesh 5 8 | 1,429,681 | 78.6% | — | — | Failed `checkMesh`; max skewness 289.8, max non-orthogonality 179.3 |
+| Coarse mesh | Mesh 4 6 | 420,567 | 100% | 18.50 | 1.592 | Converged in 156 iterations |
+| Fine mesh | Mesh 6 8 | 1,635,129 | 85.8% | 20.77 | 1.333 | Passed after mesh-quality fix; converged in 431 iterations; about 80 min |
+| Zero-angle check | Earlier mesh, AoA 0 deg | — | — | -0.015 | 0.79 | Near-zero lift as expected for the symmetric wing |
+| Later y+ = 30 | Wake box, mesh 5 7, 3 layers | 1,060,448 | 100% | 19.62 | 1.350 | `checkMesh` OK; avg/max y+ 22.3/52.4, rejected for wall-function use |
+| Current y+ = 60 baseline | Wake box, mesh 5 7, 3 layers; 600 iterations | 1,060,448 | 100% | 19.42 | 1.459 | `checkMesh` OK; avg/max y+ 39.4/99.3; residual targets not met |
+| Current y+ = 60 extended | Same setup; 1200 iterations | 1,060,448 | 100% | 19.42 | 1.459 | `checkMesh` OK; residual targets still not met |
+| Aggressive nose-box test | Nose level 8 + wake box | — | — | — | — | Failed before solve: 937 negative-volume cells, max non-orthogonality 179.98939, max skewness 18725.4 |
+
+Other recorded checks and qualifications:
+
+- `pytest -q backend/test_pipeline.py`: 10 passed, 1 skipped.
+- A repeated run with the same settings produced bit-identical values; the exact pair of run directories was not recorded.
+- One early wake-box attempt did not actually apply the box (cell count stayed 806,197); do not treat that run as a valid wake-box comparison. A later applied wake/tip-box run is listed above.
+- Reduced nose refinement was reported as giving no benefit; the aggressive nose-level-8 case failed mesh checks as shown above.
+- Mesh 6 8 initially had 8 inside-out cells when the relaxed tetrahedron-quality check was disabled. Setting `minTetQuality` to `1e-30` allowed the recorded 6 8 mesh to pass; mesh 5 8 remains failed.
+- The earlier reference was a model-based fully turbulent NACA0012 estimate (lift about 21.5–23.1 N, drag about 1.4–1.5 N), not experimental data. It suggested drag was close and lift low; it is not experimental validation.
