@@ -21,6 +21,7 @@ class T(unittest.TestCase):
         self.assertEqual(m["levels"], "5 5"); self.assertTrue(0.0008 < m["layers"]["first_m"] < 0.0016); self.assertEqual(m["layers"]["n"], 4)
         self.assertIn("addLayers true", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertIn("relaxed { maxNonOrtho 70", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertIn("nSurfaceLayers 4", open(os.path.join(case, "system/snappyHexMeshDict")).read()); self.assertAlmostEqual(m["chord_proxy_m"], 0.2, 2)
         x, y, z = m["location_in_mesh"]; b = i["bbox_m"]; self.assertLess(x, b[0]); self.assertGreater(x, m["domain_m"][0])
+<<<<<<< HEAD
     def test_nose_refinement_box(self):
         stl = os.path.join(self.d, "nose.stl")
         info = P.geometry_to_stl(self.step, stl)
@@ -42,6 +43,8 @@ class T(unittest.TestCase):
         finally:
             P.NOSE_BOX, P.NOSE_LEVEL, P.WAKE_BOX, P.WAKE_LEVEL, P.MESH_LEVELS = previous
 
+=======
+>>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
     def test_bad_step(self):
         p = os.path.join(self.d, "bad.step"); open(p, "w").write("ISO-10303-21;\nEND-ISO-10303-21;\n")
         with self.assertRaises(P.PipelineError): P.geometry_to_stl(p, os.path.join(self.d, "b.stl"))
@@ -63,6 +66,7 @@ class T(unittest.TestCase):
     def test_layers_log(self):
         log = "Extruding 70234 out of 85730 faces (81.9%). Wrote mesh in 5 s.\npatch                          faces    layers avg thickness[m]\n                                         near-wall overall\n-----                          -----    ------ --------   -------\naircraft_aircraft              85730    3.2    0.00112    0.00381\n"
         r = P.parse_layers(log); self.assertAlmostEqual(r["coverage_pct"], 81.9); self.assertAlmostEqual(r["avg_layers"], 3.2); self.assertIsNone(P.parse_layers("nothing"))
+<<<<<<< HEAD
     def test_reference_area(self):
         x0, x1, y0, y1, z0, z1 = 0.0, 0.2, -0.5, 0.5, -0.012, 0.012
         P8 = [(x, y, z) for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]
@@ -74,6 +78,8 @@ class T(unittest.TestCase):
             fh.write("endsolid box\n")
         r = P.reference_geometry(f, (x0, y0, z0, x1, y1, z1)); self.assertAlmostEqual(r["area_m2"], 0.2, 6); self.assertAlmostEqual(r["span_m"], 1.0); self.assertAlmostEqual(r["mean_chord_m"], 0.2, 6)
         self.assertIsNone(P.reference_geometry(os.path.join(self.d, "missing.stl"), (0, 0, 0, 1, 1, 1)))
+=======
+>>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
     def test_forces(self):
         d = os.path.join(self.d, "fc", "postProcessing", "forces", "0"); os.makedirs(d)
         open(os.path.join(d, "force.dat"), "w").write("# Time (total_x total_y total_z) (pressure_x pressure_y pressure_z) (viscous_x viscous_y viscous_z)\n" + "".join(f"{i} ((1.0 0.0 10.0) (0.9 0 9.9) (0.1 0 0.1))\n" for i in range(1, 30)))
