@@ -58,6 +58,10 @@ canvas{width:100%;height:auto;background:var(--bg);border-radius:6px;display:blo
 <div style="margin-top:10px"><button id="go" disabled>Start CFD Simulation</button></div></section>
 
 <section><h2>3 · Run Lifecycle <span id="life_tag" class="tag">IDLE</span></h2>
+<div id="lifecycle_timer" style="display:none;margin-bottom:8px;padding:6px 10px;background:var(--bg);border:1px solid var(--bd);border-radius:6px;font-size:12px;justify-content:space-between;align-items:center">
+  <span><b>Started:</b> <span id="time_start">--:--:--</span></span>
+  <span><b>Elapsed:</b> <span id="time_elapsed" style="font-family:monospace;font-weight:700">00:00</span></span>
+</div>
 <ul class="stages" id="stages"></ul><div id="status" class="mu" style="margin-top:6px">Idle.</div>
 <div id="log" style="margin-top:6px">(no run yet)</div></section>
 
@@ -160,11 +164,93 @@ async function checkBackend(){
   $("go").textContent="Start Demo Simulation";
 }
 
-function setStages(idx,done){
-  $("stages").innerHTML=STAGES.map((s,k)=>`<li class="${done||k<idx?"done":k===idx?"act":""}">${done||k<idx?"✔":"○"} ${s}</li>`).join("");
+let runStartTime=null, runEndTime=null, timerInterval=null;
+const stageStartTimes=[], stageDurations=[];
+let currentStageIdx=-1;
+
+function formatElapsed(ms){
+  const totalSec=Math.max(0, Math.floor(ms/1000));
+  const min=Math.floor(totalSec/60);
+  const sec=totalSec%60;
+  if(min>0) return `${min}m ${sec}s`;
+  return `${sec}s`;
 }
+
+function startLifecycleTimer(){
+  runStartTime=new Date();
+  runEndTime=null;
+  stageStartTimes.length=0;
+  stageDurations.length=0;
+  currentStageIdx=0;
+  stageStartTimes[0]=Date.now();
+
+  $("lifecycle_timer").style.display="flex";
+  $("life_tag").className="tag live";
+  $("life_tag").textContent="RUNNING";
+  $("time_start").textContent=runStartTime.toLocaleTimeString();
+  $("time_elapsed").textContent="00:00";
+
+  if(timerInterval) clearInterval(timerInterval);
+  timerInterval=setInterval(()=>{
+    if(!runStartTime||runEndTime) return;
+    const now=Date.now();
+    const totalSec=Math.floor((now-runStartTime.getTime())/1000);
+    const m=String(Math.floor(totalSec/60)).padStart(2,"0");
+    const s=String(totalSec%60).padStart(2,"0");
+    $("time_elapsed").textContent=`${m}:${s}`;
+
+    if(currentStageIdx>=0 && currentStageIdx<STAGES.length && stageStartTimes[currentStageIdx]){
+      const elap=Math.floor((now-stageStartTimes[currentStageIdx])/1000);
+      const span=$("stage_time_"+currentStageIdx);
+      if(span) span.textContent=` (${elap}s...)`;
+    }
+  }, 1000);
+}
+
+function stopLifecycleTimer(status){
+  if(timerInterval) clearInterval(timerInterval);
+  timerInterval=null;
+  runEndTime=new Date();
+  const totalMs=runEndTime.getTime()-(runStartTime?runStartTime.getTime():runEndTime.getTime());
+  const durStr=formatElapsed(totalMs);
+  $("time_elapsed").textContent=durStr;
+  $("life_tag").className=(status==="completed"||status==="completed_checks_passed")?"tag live":"tag";
+  $("life_tag").textContent=(status||"DONE").toUpperCase();
+}
+
+function setStages(idx,done){
+  const now=Date.now();
+  if(currentStageIdx>=0 && currentStageIdx!==idx && stageStartTimes[currentStageIdx] && stageDurations[currentStageIdx]===undefined){
+    stageDurations[currentStageIdx]=now-stageStartTimes[currentStageIdx];
+  }
+  if(done && currentStageIdx>=0 && stageStartTimes[currentStageIdx] && stageDurations[currentStageIdx]===undefined){
+    stageDurations[currentStageIdx]=now-stageStartTimes[currentStageIdx];
+  }
+  currentStageIdx=done?STAGES.length:idx;
+  if(!done && idx<STAGES.length && !stageStartTimes[idx]){
+    stageStartTimes[idx]=now;
+  }
+
+  $("stages").innerHTML=STAGES.map((s,k)=>{
+    const isDone=done||k<idx;
+    const isAct=!done&&k===idx;
+    let timeStr="";
+    if(stageDurations[k]!==undefined){
+      timeStr=` <span class="mu" style="font-size:11px">(${formatElapsed(stageDurations[k])})</span>`;
+    }else if(isAct&&stageStartTimes[k]){
+      const elap=Math.floor((now-stageStartTimes[k])/1000);
+      timeStr=` <span id="stage_time_${k}" class="mu" style="font-size:11px">(${elap}s...)</span>`;
+    }else{
+      timeStr=` <span id="stage_time_${k}" class="mu" style="font-size:11px"></span>`;
+    }
+    return `<li class="${isDone?"done":isAct?"act":""}">${isDone?"✔":"○"} ${s}${timeStr}</li>`;
+  }).join("");
+}
+
 function log(m){
-  const l=$("log"); l.textContent=(l.textContent==="(no run yet)"?"":l.textContent)+m+"\n"; l.scrollTop=1e9;
+  const now=new Date().toTimeString().slice(0,8);
+  const line=m.startsWith("[")?m:`[${now}] ${m}`;
+  const l=$("log"); l.textContent=(l.textContent==="(no run yet)"?"":l.textContent)+line+"\n"; l.scrollTop=1e9;
 }
 
 function drawRes(){
@@ -201,10 +287,12 @@ $("go").onclick=async()=>{
   $("cp_img").style.display="none"; $("fc_desc").textContent="Simulating flow fields...";
   drawRes();
   activeRun=true; $("go").disabled=true;
+  startLifecycleTimer();
   setStages(0);
 
   if(isBackendLive){
     $("status").innerHTML='<b>Running OpenFOAM 2312...</b>';
+    log(`[system] Simulation started at ${runStartTime.toLocaleTimeString()}`);
     log(`[system] Uploading ${geoFile.name} to CFD backend...`);
     try{
       const query=`name=${encodeURIComponent(geoFile.name)}&alpha=${A}&V=${V}&H=${H}&mesh_levels=${encodeURIComponent(meshL)}`;
@@ -243,6 +331,7 @@ $("go").onclick=async()=>{
         console.warn("SSE connection state change / reconnecting...", err);
       };
     }catch(err){
+      stopLifecycleTimer("failed");
       log(`[error] Failed to start live run: ${err.message}.`);
       $("status").innerHTML=`<b class="err">Submission failed: ${esc(err.message)}</b>`;
       activeRun=false; $("go").disabled=false;
@@ -280,7 +369,8 @@ function runDemo(V,A,H){
 }
 
 async function finishLive(runId,status,resObj){
-  activeRun=false; setStages(7,true); validate();
+  activeRun=false; stopLifecycleTimer(status); setStages(7,true); validate();
+  log(`[system] Simulation completed at ${runEndTime.toLocaleTimeString()} (Total compute duration: ${formatElapsed(runEndTime-runStartTime)})`);
   $("status").innerHTML=`<b>Finished: ${esc(status).toUpperCase()}</b> <span class="tag live">REAL OPENFOAM</span>`;
   $("ai").innerHTML="Simulation completed. Results and force validation computed via 3D Navier-Stokes RANS.";
   
@@ -292,6 +382,9 @@ async function finishLive(runId,status,resObj){
   const l=r&&r.layers;
   const rows=[
     ["Status", status.toUpperCase()],
+    ["Run Started", runStartTime?runStartTime.toLocaleTimeString():"N/A"],
+    ["Run Completed", runEndTime?runEndTime.toLocaleTimeString():"N/A"],
+    ["Total Run Time", runStartTime&&runEndTime?formatElapsed(runEndTime-runStartTime):"N/A"],
     ["Lift Force", f.lift_N!==undefined?f.lift_N.toFixed(2)+" N":"N/A"],
     ["Drag Force", f.drag_N!==undefined?f.drag_N.toFixed(2)+" N":"N/A"],
     ["Lift Coefficient (CL)", f.CL!==undefined?f.CL.toFixed(4):"N/A"],
@@ -320,10 +413,13 @@ async function finishLive(runId,status,resObj){
 }
 
 function finishDemo(V,A,H){
-  activeRun=false; setStages(7,true); validate();
+  activeRun=false; stopLifecycleTimer("DEMO SAMPLE"); setStages(7,true); validate();
   const s=isa(H), q=0.5*s.rho*V*V;
   const rows=[
     ["Status", "DEMO SAMPLE"],
+    ["Run Started", runStartTime?runStartTime.toLocaleTimeString():"N/A"],
+    ["Run Completed", runEndTime?runEndTime.toLocaleTimeString():"N/A"],
+    ["Total Run Time", runStartTime&&runEndTime?formatElapsed(runEndTime-runStartTime):"N/A"],
     ["Lift Force", (q*0.35*0.21).toFixed(2)+" N (sample)"],
     ["Drag Force", (q*0.35*0.021).toFixed(2)+" N (sample)"],
     ["Lift Coefficient (CL)", "0.2115 (sample)"],

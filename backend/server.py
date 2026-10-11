@@ -158,7 +158,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         p = urlparse(self.path).path.strip("/").split("/")
-        if p == [""] or p == [] or p == ["index.html"]:
+        if p == [""] or p == [] or p == ["index.html"] or p == ["frontend", "index.html"] or (len(p) == 1 and p[0].endswith(".html")):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -172,7 +172,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = urlparse(self.path).path.strip("/").split("/")
-        if p == [""] or p == [] or p == ["index.html"]:
+        if p == [""] or p == [] or p == ["index.html"] or p == ["frontend", "index.html"] or (len(p) == 1 and p[0].endswith(".html")):
             if os.path.exists(FRONTEND_HTML):
                 return self._j(200, open(FRONTEND_HTML, "rb").read(), "text/html")
         if p == ["health"]:
