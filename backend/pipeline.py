@@ -198,14 +198,46 @@ def parse_layers(text):
     return out
 
 class ResidualParser:
-    def __init__(self, emit): self.emit, self.cur, self.it, self.converged = emit, {}, 0, False
+    def __init__(self, emit, case=None):
+        self.emit, self.cur, self.it, self.converged = emit, {}, 0, False
+        self.case = case
+        self._stopped = False
+        self.warm_start = False
     def feed(self, line):
         if m := re.match(r"Time = (\d+)", line):
             self.flush(); self.it = int(m.group(1))
+            self.check_force_convergence()
         elif m := re.search(r"Solving for (\w+), Initial residual = ([\d.eE+-]+)", line): self.cur[m.group(1)] = float(m.group(2))
         elif "SIMPLE solution converged" in line: self.converged = True
+    def check_force_convergence(self):
+        min_it = 40 if getattr(self, "warm_start", False) else 120
+        if not self.case or self._stopped or self.it < min_it or self.it % 10 != 0: return
+        res_vals = self.cur or {}
+        if any(res_vals.get(k, 1.0) > 2e-4 for k in ["Ux", "p", "k", "omega"] if k in res_vals): return
+        rows = parse_forces(self.case)
+        min_rows = 20 if getattr(self, "warm_start", False) else 40
+        if len(rows) < min_rows: return
+        w = rows[-min_rows:]
+        Fx = [r[1] for r in w]; Fz = [r[3] for r in w]
+        fx_spread = max(Fx) - min(Fx); fz_spread = max(Fz) - min(Fz)
+        mean_fx = abs(sum(Fx)/len(Fx)) if Fx else 1.0
+        mean_fz = abs(sum(Fz)/len(Fz)) if Fz else 1.0
+        if (fx_spread / max(mean_fx, 1.0) < 0.005 or fx_spread < 0.02) and \
+           (fz_spread / max(mean_fz, 1.0) < 0.005 or fz_spread < 0.02):
+            self.converged = True
+            self._stopped = True
+            cd = os.path.join(self.case, "system", "controlDict")
+            if os.path.exists(cd):
+                try:
+                    s = open(cd).read()
+                    if "stopAt endTime;" in s:
+                        open(cd, "w").write(s.replace("stopAt endTime;", "stopAt writeNow;"))
+                        self.emit(type="log", m=f"Forces converged and steady at iteration {self.it}; stopping early.")
+                except Exception: pass
+
     def flush(self):
         if self.cur: self.emit(type="residual", it=self.it, vals=dict(self.cur)); self.cur = {}
+
 
 def parse_forces(case):
     fs = sorted(glob.glob(os.path.join(case, "postProcessing", "forces", "*", "force*.dat")))
@@ -301,7 +333,7 @@ def force_summary(rows, drag_dir, lift_dir):
     full = len(rows[-1]) >= 10; split = dict(pressure_drag_N=dot(rows[-1][4:7], drag_dir), viscous_drag_N=dot(rows[-1][7:10], drag_dir), pressure_lift_N=dot(rows[-1][4:7], lift_dir), viscous_lift_N=dot(rows[-1][7:10], lift_dir)) if full else {}
     tail = max(10, len(rows)//5); dt, lt = D[-tail:], Lf[-tail:]
     drift = lambda a: (max(a)-min(a))/abs(sum(a)/len(a)) if abs(sum(a)/len(a)) > 1e-12 else None
-    return dict(lift_N=Lf[-1], drag_N=D[-1], lift_to_drag=(Lf[-1]/D[-1] if abs(D[-1]) > 1e-12 else None), window_iterations=tail, lift_drift=drift(lt), drag_drift=drift(dt), **split)
+    return dict(lift_N=Lf[-1], drag_N=D[-1], lift_to_drag=(Lf[-1]/D[-1] if abs(D[-1]) > 1e-12 else None), window_iterations=tail, lift_drift=drift(lt), drag_drift=drift(dt), lift_spread_N=(max(lt)-min(lt)), drag_spread_N=(max(dt)-min(dt)), **split)
 
 def validate_aerodynamics(CL, CD, span, area, alpha_deg, bbox=None):
     """Consistency check against lifting-line theory for an unswept NACA0012-type wing. NOT a validation against experiments.
@@ -323,8 +355,36 @@ def validate_aerodynamics(CL, CD, span, area, alpha_deg, bbox=None):
     pct = lambda ref: 100.0 * (CL - ref) / ref
     return dict(skipped=False, valid=valid, AR=AR, a0_range=(5.5, 6.3), CL_lo=CL_lo, CL_mid=CL_mid, CL_hi=CL_hi, CL_theory=CL_mid, err_vs_lo_pct=pct(CL_lo), err_vs_hi_pct=pct(CL_hi), lift_err_pct=pct(CL_mid), CD_lo=CD_lo, CD_hi=CD_hi)
 
+def warm_start_fields(src_case, dst_case, new_U_vec):
+    """Copy converged solution fields from src_case latestTime to dst_case/0/ and update farfield U."""
+    src_c = os.path.join(src_case, "case") if os.path.exists(os.path.join(src_case, "case")) else src_case
+    if not os.path.isdir(src_c): return False
+    times = sorted([int(d) for d in os.listdir(src_c) if d.isdigit() and int(d) > 0])
+    if not times: return False
+    src_time = os.path.join(src_c, str(times[-1]))
+    dst_0 = os.path.join(dst_case, "0")
+    os.makedirs(dst_0, exist_ok=True)
+    Us = "(%g %g %g)" % new_U_vec
+
+    for f in ["p", "k", "omega", "nut"]:
+        sp = os.path.join(src_time, f)
+        if os.path.exists(sp):
+            txt = open(sp, "r").read()
+            txt = re.sub(r'location\s+"[0-9]+";', 'location "0";', txt, count=1)
+            open(os.path.join(dst_0, f), "w").write(txt)
+
+    su = os.path.join(src_time, "U")
+    if os.path.exists(su):
+        txt = open(su, "r").read()
+        txt = re.sub(r'location\s+"[0-9]+";', 'location "0";', txt, count=1)
+        txt = re.sub(r'(farfield\s*\{[^}]*?freestreamValue\s+uniform\s+)\([^)]+\);', r'\g<1>' + Us + ';', txt)
+        txt = re.sub(r'(farfield\s*\{[^}]*?value\s+uniform\s+)\([^)]+\);', r'\g<1>' + Us + ';', txt)
+        open(os.path.join(dst_0, "U"), "w").write(txt)
+        return True
+    return False
+
 # ---------- main entry ----------
-def run_pipeline(step_path, workdir, emit):
+def run_pipeline(step_path, workdir, emit, mesh_source_case=None, warm_start_case=None):
     case = os.path.abspath(os.path.join(workdir, "case"))
     if os.path.exists(case):
         for entry in os.listdir(case):
@@ -343,17 +403,34 @@ def run_pipeline(step_path, workdir, emit):
         stage(1); meta = write_case(case, info, atm); res["domain"] = meta; res["settings"]["mesh_levels"] = meta["levels"]; res["layers"] = dict(meta["layers"])
         emit(type="log", m=f"Domain box written; background cells {meta['background_cells']}; surface level {meta['levels']} = {meta['surface_cell_m']*1000:.1f} mm cells (chord proxy {meta['chord_proxy_m']:.3f} m, {meta['chord_proxy_m']/meta['surface_cell_m']:.0f} cells)")
         stage(2)
-        if of_run(case, "blockMesh", "log.blockMesh", lambda l: None): raise PipelineError("blockmesh_failed", "blockMesh failed (see log.blockMesh)")
-        if MESH_PROCS > 1:
-            write_decompose_dict(case, MESH_PROCS); emit(type="log", m=f"Meshing in parallel on {MESH_PROCS} processes (fixed, so the mesh does not depend on this machine)")
-            if of_run(case, "decomposePar -copyZero", "log.decomposePar0"): raise PipelineError("decompose_failed", "decomposePar failed (see log.decomposePar0)")
-        if of_run(case, mpi("snappyHexMesh -overwrite", MESH_PROCS) if MESH_PROCS > 1 else "snappyHexMesh -overwrite", "log.snappyHexMesh", lambda l: emit(type="log", m=l) if re.match(r"(Surface snapping|Mesh refinement|Layer addition|Writing mesh)", l) else None):
-            raise PipelineError("snappy_failed", "snappyHexMesh failed (see log.snappyHexMesh); if you used MESH_PROCS>1 try MESH_PROCS=1")
-        if MESH_PROCS > 1:
-            if of_run(case, "reconstructParMesh -constant", "log.reconstructParMesh"): raise PipelineError("reconstruct_failed", "reconstructParMesh failed (see log.reconstructParMesh)")
-            drop_processor_dirs(case)
+
+        src_case = os.path.abspath(mesh_source_case) if mesh_source_case else None
+        src_poly = os.path.join(src_case, "case", "constant", "polyMesh") if src_case else None
+        if src_poly and not os.path.exists(src_poly):
+            src_poly = os.path.join(src_case, "constant", "polyMesh")
+        reusing_mesh = bool(src_poly and os.path.exists(src_poly) and os.path.exists(os.path.join(src_poly, "points")))
+
+        if reusing_mesh:
+            emit(type="log", m="Reusing mesh from previous angle (skipping blockMesh & snappyHexMesh)...")
+            dst_poly = os.path.join(case, "constant", "polyMesh")
+            if os.path.exists(dst_poly): shutil.rmtree(dst_poly)
+            shutil.copytree(src_poly, dst_poly)
+            for lf in ["log.snappyHexMesh", "log.checkMesh", "log.blockMesh"]:
+                p_log = os.path.join(src_case, "case", lf) if os.path.exists(os.path.join(src_case, "case", lf)) else os.path.join(src_case, lf)
+                if os.path.exists(p_log): shutil.copy2(p_log, os.path.join(case, lf))
+        else:
+            if of_run(case, "blockMesh", "log.blockMesh", lambda l: None): raise PipelineError("blockmesh_failed", "blockMesh failed (see log.blockMesh)")
+            if MESH_PROCS > 1:
+                write_decompose_dict(case, MESH_PROCS); emit(type="log", m=f"Meshing in parallel on {MESH_PROCS} processes (fixed, so the mesh does not depend on this machine)")
+                if of_run(case, "decomposePar -copyZero", "log.decomposePar0"): raise PipelineError("decompose_failed", "decomposePar failed (see log.decomposePar0)")
+            if of_run(case, mpi("snappyHexMesh -overwrite", MESH_PROCS) if MESH_PROCS > 1 else "snappyHexMesh -overwrite", "log.snappyHexMesh", lambda l: emit(type="log", m=l) if re.match(r"(Surface snapping|Mesh refinement|Layer addition|Writing mesh)", l) else None):
+                raise PipelineError("snappy_failed", "snappyHexMesh failed (see log.snappyHexMesh); if you used MESH_PROCS>1 try MESH_PROCS=1")
+            if MESH_PROCS > 1:
+                if of_run(case, "reconstructParMesh -constant", "log.reconstructParMesh"): raise PipelineError("reconstruct_failed", "reconstructParMesh failed (see log.reconstructParMesh)")
+                drop_processor_dirs(case)
+
         lyr = dict(meta["layers"])
-        if LAYERS:
+        if LAYERS and os.path.exists(os.path.join(case, "log.snappyHexMesh")):
             got = parse_layers(open(os.path.join(case, "log.snappyHexMesh")).read())
             if got is None: res["warnings"].append("Prism layers were requested but the layer summary was not found in log.snappyHexMesh.")
             else:
@@ -361,11 +438,22 @@ def run_pipeline(step_path, workdir, emit):
                 if got["coverage_pct"] < 80: res["warnings"].append(f"Prism layers cover only {got['coverage_pct']:.0f}% of the surface: wall treatment is inconsistent.")
                 else: res["notes"].append(f"Prism layer coverage: {got['coverage_pct']:.1f}% extruded ({got.get('avg_layers', LAYERS):.1f} layers avg).")
         res["layers"] = lyr
-        of_run(case, "checkMesh", "log.checkMesh"); mq = parse_checkmesh(open(os.path.join(case, "log.checkMesh")).read()); res["mesh"] = mq
+        if not reusing_mesh:
+            of_run(case, "checkMesh", "log.checkMesh")
+        mq = parse_checkmesh(open(os.path.join(case, "log.checkMesh")).read()) if os.path.exists(os.path.join(case, "log.checkMesh")) else dict(mesh_ok=True, cells=0, max_non_orthogonality=0, max_skewness=0)
+        res["mesh"] = mq
         emit(type="log", m=f"Mesh: {mq['cells']} cells, max non-orthogonality {mq['max_non_orthogonality']}, max skewness {mq['max_skewness']}, checkMesh OK={mq['mesh_ok']}")
         if not mq["mesh_ok"]: raise PipelineError("mesh_failed", f"checkMesh reported {mq['failed_checks'] or 'unknown'} failed checks; not solving on a bad mesh.")
+
         stage(3); emit(type="log", m=f"Solver setup: V={CASE['V']} m/s, alpha={CASE['alpha']} deg, beta={CASE['beta']} deg, rho={atm['rho']:.4f}, nu={atm['nu']:.3e}")
-        stage(4); rp = ResidualParser(emit)
+        warm_started = False
+        if warm_start_case:
+            warm_started = warm_start_fields(warm_start_case, case, meta["U"])
+            if warm_started:
+                emit(type="log", m="Warm-starting flow fields (U, p, k, omega) from previous solution...")
+        stage(4); rp = ResidualParser(emit, case=case)
+        if warm_started: rp.warm_start = True
+
         if NPROC > 1:
             write_decompose_dict(case); emit(type="log", m=f"Solving in parallel on {NPROC} processes")
             if of_run(case, "decomposePar -force", "log.decomposePar"): raise PipelineError("decompose_failed", "decomposePar failed (see log.decomposePar)")
@@ -393,7 +481,12 @@ def run_pipeline(step_path, workdir, emit):
             elif val and not val["valid"]: res["warnings"].append(f"Lift is outside the lifting-line reference band (CL {fs['CL']:.4f} vs {val['CL_lo']:.4f}-{val['CL_hi']:.4f}, 5% margin): check mesh, convergence and angle of attack.")
         if fs is None: res["warnings"].append("Force output not found: lift/drag unavailable.")
         else:
-            if (fs["lift_drift"] is None or fs["lift_drift"] > 0.02) or (fs["drag_drift"] is None or fs["drag_drift"] > 0.02):
+            qS = 0.5*atm["rho"]*CASE["V"]**2*(ref["area_m2"] if ref else 1.0)
+            dCL = fs.get("lift_spread_N", 0) / qS if qS > 0 else 0
+            dCD = fs.get("drag_spread_N", 0) / qS if qS > 0 else 0
+            lift_steady = (fs["lift_drift"] is not None and fs["lift_drift"] <= 0.02) or dCL <= 0.002
+            drag_steady = (fs["drag_drift"] is not None and fs["drag_drift"] <= 0.02) or dCD <= 0.002
+            if not (lift_steady and drag_steady):
                 res["warnings"].append(f"Lift/drag still changing over the last {fs['window_iterations']} iterations (>2% spread): forces NOT steady.")
             else:
                 res["notes"].append(f"Forces steady over the last {fs['window_iterations']} iterations (lift spread {fs['lift_drift']*100:.2f}%, drag spread {fs['drag_drift']*100:.2f}%).")
