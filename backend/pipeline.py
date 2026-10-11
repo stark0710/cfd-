@@ -540,3 +540,42 @@ def make_report(r):
         L += ["", "## Limitations (always apply)", *[f"- {n}" for n in r["limitations"]]]
     L += [""]
     return "\n".join(L)
+
+
+if __name__ == "__main__":
+    import argparse, sys
+    parser = argparse.ArgumentParser(description="Run OpenFOAM CFD pipeline on a STEP file")
+    parser.add_argument("step", help="Path to STEP CAD file")
+    parser.add_argument("workdir", help="Output directory")
+    parser.add_argument("--alpha", type=float, default=4.0)
+    parser.add_argument("--speed", "-V", type=float, default=25.0)
+    parser.add_argument("--altitude", "-H", type=float, default=0.0)
+    parser.add_argument("--beta", type=float, default=0.0)
+    parser.add_argument("--mesh-levels", default="5 7")
+    parser.add_argument("--mesh-source-case", default=None)
+    parser.add_argument("--warm-start-case", default=None)
+    args = parser.parse_args()
+
+    CASE["alpha"] = args.alpha
+    CASE["V"] = args.speed
+    CASE["H"] = args.altitude
+    CASE["beta"] = args.beta
+    MESH_LEVELS = args.mesh_levels
+    os.environ["MESH_LEVELS"] = args.mesh_levels
+
+    def emit_cli(**kwargs):
+        print(f"CFD_EVENT:{json.dumps(kwargs, default=str)}", flush=True)
+
+    try:
+        run_pipeline(
+            args.step,
+            args.workdir,
+            emit_cli,
+            mesh_source_case=args.mesh_source_case,
+            warm_start_case=args.warm_start_case
+        )
+    except Exception as exc:
+        emit_cli(type="error", code="unhandled_exception", m=str(exc))
+        emit_cli(type="done", status="failed")
+        sys.exit(1)
+

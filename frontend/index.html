@@ -231,6 +231,7 @@ $("go").onclick=async()=>{
           }
           if(e.type==="error"){
             log(`[error] ${e.m}`);
+            $("status").innerHTML=`<b class="err">Error: ${esc(e.m)}</b>`;
           }
           if(e.type==="done"){
             es.close();
@@ -238,10 +239,13 @@ $("go").onclick=async()=>{
           }
         }catch(err){console.error(err)}
       };
-      es.onerror=()=>{es.close(); finishLive(runId,"completed");};
+      es.onerror=(err)=>{
+        console.warn("SSE connection state change / reconnecting...", err);
+      };
     }catch(err){
-      log(`[error] Failed to start live run: ${err.message}. Falling back to demo.`);
-      runDemo(V,A,H);
+      log(`[error] Failed to start live run: ${err.message}.`);
+      $("status").innerHTML=`<b class="err">Submission failed: ${esc(err.message)}</b>`;
+      activeRun=false; $("go").disabled=false;
     }
   }else{
     runDemo(V,A,H);
