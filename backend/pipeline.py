@@ -12,7 +12,7 @@ END_TIME = int(os.environ.get("END_TIME", "600"))
 RES_TARGET = os.environ.get("RES_TARGET", "3e-5")                # residual target for U, k, omega (p stays 1e-4)
 NPROC = max(1, int(os.environ.get("NPROC", str(min(8, os.cpu_count() or 1)))))              # MPI processes for snappyHexMesh and simpleFoam (default auto-scaled)
 MESH_PROCS = max(1, int(os.environ.get("MESH_PROCS", "6")))   # fixed process count for meshing, so the mesh does not depend on the machine
-WAKE_BOX = os.environ.get("WAKE_BOX", "1") == "1"
+WAKE_BOX = os.environ.get("WAKE_BOX", "0") == "1"
 WAKE_LEVEL = os.environ.get("WAKE_LEVEL")
 NOSE_BOX = os.environ.get("NOSE_BOX", "0") == "1"
 NOSE_LEVEL = os.environ.get("NOSE_LEVEL")
@@ -552,6 +552,7 @@ if __name__ == "__main__":
     parser.add_argument("--altitude", "-H", type=float, default=0.0)
     parser.add_argument("--beta", type=float, default=0.0)
     parser.add_argument("--mesh-levels", default="5 7")
+    parser.add_argument("--wake-box", type=int, default=0, help="Enable (1) or disable (0) wake box refinement (default: 0)")
     parser.add_argument("--mesh-source-case", default=None)
     parser.add_argument("--warm-start-case", default=None)
     args = parser.parse_args()
@@ -562,6 +563,8 @@ if __name__ == "__main__":
     CASE["beta"] = args.beta
     MESH_LEVELS = args.mesh_levels
     os.environ["MESH_LEVELS"] = args.mesh_levels
+    WAKE_BOX = bool(args.wake_box)
+    os.environ["WAKE_BOX"] = str(args.wake_box)
 
     def emit_cli(**kwargs):
         print(f"CFD_EVENT:{json.dumps(kwargs, default=str)}", flush=True)

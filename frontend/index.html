@@ -218,32 +218,39 @@ function stopLifecycleTimer(status){
   $("life_tag").textContent=(status||"DONE").toUpperCase();
 }
 
-function setStages(idx,done){
+let failedStageIdx=-1;
+
+function setStages(idx,done,failed=false){
   const now=Date.now();
+  if(failed) failedStageIdx=currentStageIdx;
   if(currentStageIdx>=0 && currentStageIdx!==idx && stageStartTimes[currentStageIdx] && stageDurations[currentStageIdx]===undefined){
     stageDurations[currentStageIdx]=now-stageStartTimes[currentStageIdx];
   }
-  if(done && currentStageIdx>=0 && stageStartTimes[currentStageIdx] && stageDurations[currentStageIdx]===undefined){
+  if((done||failed) && currentStageIdx>=0 && stageStartTimes[currentStageIdx] && stageDurations[currentStageIdx]===undefined){
     stageDurations[currentStageIdx]=now-stageStartTimes[currentStageIdx];
   }
-  currentStageIdx=done?STAGES.length:idx;
-  if(!done && idx<STAGES.length && !stageStartTimes[idx]){
-    stageStartTimes[idx]=now;
+  if(!done && !failed){
+    currentStageIdx=idx;
+    if(idx<STAGES.length && !stageStartTimes[idx]) stageStartTimes[idx]=now;
   }
 
   $("stages").innerHTML=STAGES.map((s,k)=>{
-    const isDone=done||k<idx;
-    const isAct=!done&&k===idx;
-    let timeStr="";
-    if(stageDurations[k]!==undefined){
-      timeStr=` <span class="mu" style="font-size:11px">(${formatElapsed(stageDurations[k])})</span>`;
-    }else if(isAct&&stageStartTimes[k]){
-      const elap=Math.floor((now-stageStartTimes[k])/1000);
+    let icon="○", cls="", timeStr="";
+    if(failed && k===failedStageIdx){
+      icon="✖"; cls="err";
+      const dur=stageDurations[k]||(now-(stageStartTimes[k]||now));
+      timeStr=` <span class="err" style="font-size:11px">(${formatElapsed(dur)} - failed)</span>`;
+    }else if(done || (!failed && k<idx) || (failed && k<failedStageIdx)){
+      icon="✔"; cls="done";
+      if(stageDurations[k]!==undefined) timeStr=` <span class="mu" style="font-size:11px">(${formatElapsed(stageDurations[k])})</span>`;
+    }else if(!done && !failed && k===idx){
+      icon="○"; cls="act";
+      const elap=Math.floor((now-(stageStartTimes[k]||now))/1000);
       timeStr=` <span id="stage_time_${k}" class="mu" style="font-size:11px">(${elap}s...)</span>`;
     }else{
-      timeStr=` <span id="stage_time_${k}" class="mu" style="font-size:11px"></span>`;
+      icon="○"; cls="";
     }
-    return `<li class="${isDone?"done":isAct?"act":""}">${isDone?"✔":"○"} ${s}${timeStr}</li>`;
+    return `<li class="${cls}">${icon} ${s}${timeStr}</li>`;
   }).join("");
 }
 
@@ -369,10 +376,19 @@ function runDemo(V,A,H){
 }
 
 async function finishLive(runId,status,resObj){
-  activeRun=false; stopLifecycleTimer(status); setStages(7,true); validate();
-  log(`[system] Simulation completed at ${runEndTime.toLocaleTimeString()} (Total compute duration: ${formatElapsed(runEndTime-runStartTime)})`);
-  $("status").innerHTML=`<b>Finished: ${esc(status).toUpperCase()}</b> <span class="tag live">REAL OPENFOAM</span>`;
-  $("ai").innerHTML="Simulation completed. Results and force validation computed via 3D Navier-Stokes RANS.";
+  activeRun=false;
+  const isFailed=(status==="failed");
+  stopLifecycleTimer(status);
+  setStages(isFailed?currentStageIdx:7, !isFailed, isFailed);
+  validate();
+  log(`[system] Simulation ${isFailed?"failed / stopped":"completed"} at ${runEndTime.toLocaleTimeString()} (Duration: ${formatElapsed(runEndTime-runStartTime)})`);
+  if(isFailed){
+    $("status").innerHTML=`<b class="err">Finished: FAILED</b> <span class="tag">SOLVER ERROR</span>`;
+    $("ai").innerHTML="<span class='err'>Simulation stopped during meshing/solving. Check the log box below for the OpenFOAM diagnostic message.</span>";
+  }else{
+    $("status").innerHTML=`<b>Finished: ${esc(status).toUpperCase()}</b> <span class="tag live">REAL OPENFOAM</span>`;
+    $("ai").innerHTML="Simulation completed. Results and force validation computed via 3D Navier-Stokes RANS.";
+  }
   
   let r=resObj;
   if(!r){

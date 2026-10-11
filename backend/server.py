@@ -106,6 +106,10 @@ class RunManager:
             cmd += ["--beta", str(float(self.params["beta"][0]))]
         if "mesh_levels" in self.params:
             cmd += ["--mesh-levels", self.params["mesh_levels"][0]]
+        if "wake_box" in self.params:
+            cmd += ["--wake-box", str(int(self.params["wake_box"][0]))]
+        else:
+            cmd += ["--wake-box", "0"]
 
         env = os.environ.copy()
         pythonpath = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
