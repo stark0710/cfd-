@@ -400,6 +400,7 @@ def run_pipeline(step_path, workdir, emit, mesh_source_case=None, warm_start_cas
         info = geometry_to_stl(step_path, os.path.join(case, "constant", "triSurface", "aircraft.stl")); res["geometry"] = info
         res["notes"] += info.get("warnings", []) + ["Mesh size is set from a chord proxy (middle bounding-box dimension), not a true chord."]
         emit(type="log", m=f"Geometry: {info['solids']} solid, {info['faces']} faces, size {info['length_scale_m']:.3f} m, {info['triangles']} surface triangles, watertight")
+        emit(type="geometry_ready", url=f"/runs/{os.path.basename(workdir)}/stl", triangles=info["triangles"], length_scale_m=info["length_scale_m"])
         stage(1); meta = write_case(case, info, atm); res["domain"] = meta; res["settings"]["mesh_levels"] = meta["levels"]; res["layers"] = dict(meta["layers"])
         emit(type="log", m=f"Domain box written; background cells {meta['background_cells']}; surface level {meta['levels']} = {meta['surface_cell_m']*1000:.1f} mm cells (chord proxy {meta['chord_proxy_m']:.3f} m, {meta['chord_proxy_m']/meta['surface_cell_m']:.0f} cells)")
         stage(2)

@@ -397,9 +397,14 @@ $("go").onclick=async()=>{
       es.onmessage=ev=>{
         try{
           const e=JSON.parse(ev.data);
+          if(e.type==="geometry_ready"){
+            log(`[3D Viewer] Loaded customer geometry: ${e.triangles.toLocaleString()} triangles, scale ${e.length_scale_m.toFixed(2)} m`);
+            loadAircraftModel(e.url);
+          }
           if(e.type==="stage"){
             setStages(e.i);
             $("ai").textContent=EXPLAIN[e.i]||"Solving...";
+            handleStage3DTransition(e.i);
           }
           if(e.type==="log") log(e.m);
           if(e.type==="residual"){
@@ -903,39 +908,68 @@ function animate3D(){
   if(renderer&&scene&&camera) renderer.render(scene, camera);
 }
 
+function setRenderMode(mode){
+  renderMode=mode;
+  if(!planeMesh) return;
+  if(mode==="solid"){
+    planeMesh.material=solidMat;
+    $("btn_m_solid").className="btn-sm active"; $("btn_m_solid").style.background="var(--ac)";
+    $("btn_m_wire").className="btn-sm"; $("btn_m_wire").style.background="#475569";
+    $("btn_m_cp").className="btn-sm"; $("btn_m_cp").style.background="#475569";
+    $("viewer3d_legend").style.display="none";
+  }else if(mode==="wire"){
+    planeMesh.material=wireMat;
+    $("btn_m_wire").className="btn-sm active"; $("btn_m_wire").style.background="var(--ac)";
+    $("btn_m_solid").className="btn-sm"; $("btn_m_solid").style.background="#475569";
+    $("btn_m_cp").className="btn-sm"; $("btn_m_cp").style.background="#475569";
+    $("viewer3d_legend").style.display="none";
+  }else if(mode==="cp"){
+    if(cpMat) planeMesh.material=cpMat;
+    $("btn_m_cp").className="btn-sm active"; $("btn_m_cp").style.background="var(--ac)";
+    $("btn_m_solid").className="btn-sm"; $("btn_m_solid").style.background="#475569";
+    $("btn_m_wire").className="btn-sm"; $("btn_m_wire").style.background="#475569";
+    $("viewer3d_legend").style.display="block";
+  }
+}
+
+function setStreamlines(active){
+  streamlinesVisible=active;
+  if(streamlineSystem) streamlineSystem.visible=active;
+  $("btn_flow_toggle").textContent=active?"Streamlines: ON":"Streamlines: OFF";
+  $("btn_flow_toggle").style.background=active?"#059669":"#64748b";
+}
+
+function handleStage3DTransition(idx){
+  if(idx===0||idx===1){
+    // Geometry inspection & Domain setup -> Inspect Solid Customer Model
+    setRenderMode("solid");
+    setStreamlines(false);
+    $("viewer3d_overlay").textContent="Stage 1/6: Customer CAD Geometry Inspected & Domain Bounded";
+  }else if(idx===2){
+    // Meshing stage -> Show Volume Mesh & Boundary Wireframe
+    setRenderMode("wire");
+    setStreamlines(false);
+    $("viewer3d_overlay").textContent="Stage 3/6: Meshing Active — snappyHexMesh Volume Hex Refinement & 3 Prism Layers";
+  }else if(idx===3||idx===4){
+    // Solving stage -> Activate Live Flow Streamlines over Customer Airplane!
+    setRenderMode("solid");
+    setStreamlines(true);
+    $("viewer3d_overlay").textContent="Stage 5/6: Flow Field Active — Navier-Stokes Velocity Streamlines & Wingtip Vortices";
+  }else if(idx>=5){
+    // Post-processing / Done -> Map 3D Surface Pressure (Cp) Contours!
+    setRenderMode("cp");
+    setStreamlines(true);
+    $("viewer3d_overlay").textContent="Simulation Solved: 3D Surface Pressure (Cp) & Aerodynamic Forces Computed";
+  }
+}
+
 // 3D Viewport Controls Toolbar
-$("btn_m_solid").onclick=()=>{
-  renderMode="solid";
-  if(planeMesh) planeMesh.material=solidMat;
-  $("btn_m_solid").className="btn-sm active";
-  $("btn_m_wire").className="btn-sm"; $("btn_m_wire").style.background="#475569";
-  $("btn_m_cp").className="btn-sm"; $("btn_m_cp").style.background="#475569";
-  $("viewer3d_legend").style.display="none";
-};
-
-$("btn_m_wire").onclick=()=>{
-  renderMode="wire";
-  if(planeMesh) planeMesh.material=wireMat;
-  $("btn_m_wire").className="btn-sm active"; $("btn_m_wire").style.background="var(--ac)";
-  $("btn_m_solid").className="btn-sm";
-  $("btn_m_cp").className="btn-sm"; $("btn_m_cp").style.background="#475569";
-  $("viewer3d_legend").style.display="none";
-};
-
-$("btn_m_cp").onclick=()=>{
-  renderMode="cp";
-  if(planeMesh&&cpMat) planeMesh.material=cpMat;
-  $("btn_m_cp").className="btn-sm active"; $("btn_m_cp").style.background="var(--ac)";
-  $("btn_m_solid").className="btn-sm";
-  $("btn_m_wire").className="btn-sm"; $("btn_m_wire").style.background="#475569";
-  $("viewer3d_legend").style.display="block";
-};
+$("btn_m_solid").onclick=()=>setRenderMode("solid");
+$("btn_m_wire").onclick=()=>setRenderMode("wire");
+$("btn_m_cp").onclick=()=>setRenderMode("cp");
 
 $("btn_flow_toggle").onclick=()=>{
-  streamlinesVisible=!streamlinesVisible;
-  if(streamlineSystem) streamlineSystem.visible=streamlinesVisible;
-  $("btn_flow_toggle").textContent=streamlinesVisible?"Streamlines: ON":"Streamlines: OFF";
-  $("btn_flow_toggle").style.background=streamlinesVisible?"#059669":"#64748b";
+  setStreamlines(!streamlinesVisible);
 };
 
 $("flow_speed_slider").oninput=e=>{
