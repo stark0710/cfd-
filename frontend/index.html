@@ -100,7 +100,7 @@ textarea{width:100%;height:140px;font:11.5px ui-monospace,monospace;background:v
   </div>
   <div id="viewer3d_container">
     <canvas id="viewer3d_canvas"></canvas>
-    <div class="viewer_stat" id="viewer3d_overlay">Awaiting CAD upload / solve...</div>
+    <div class="viewer_stat" id="viewer3d_overlay">Awaiting STEP CAD Upload — Choose a .step or .stp file above to inspect and simulate</div>
     <div class="viewer_legend" id="viewer3d_legend" style="display:none">
       <div style="font-weight:700;margin-bottom:4px">Surface Pressure (Cp)</div>
       <div style="display:flex;align-items:center;gap:6px;font-size:10px">
@@ -242,8 +242,8 @@ $("file").addEventListener("change",async ev=>{
   $("geo").innerHTML=`<div class="ok">✔ <b>${esc(f.name)}</b> (${(f.size/1024).toFixed(1)} KB)</div>
   <table style="margin-top:6px"><tr><td>Solids</td><td>${solids||1}</td><td>Faces</td><td>${faces||'N/A'}</td><td>Format</td><td>AP203/AP214</td></tr></table>`;
   validate();
-  // Trigger 3D model update if matching available STL
-  loadAircraftModel("/models/aircraft.stl");
+  if(planeMesh){ scene.remove(planeMesh); planeMesh=null; }
+  $("viewer3d_overlay").textContent=`CAD Model Selected: ${f.name} — Click "Start Live OpenFOAM Run" to mesh & simulate`;
 });
 
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
@@ -414,6 +414,7 @@ $("go").onclick=async()=>{
   $("yplus_placeholder").style.display="block";
   $("yplus_content").style.display="none";
   handleStage3DTransition(0);
+  if(planeMesh){ scene.remove(planeMesh); planeMesh=null; }
 
   if(isBackendLive){
     $("status").innerHTML='<b>Running OpenFOAM 2312...</b>';
@@ -472,6 +473,7 @@ $("go").onclick=async()=>{
 };
 
 function runDemo(V,A,H){
+  loadAircraftModel("/models/aircraft.stl");
   $("status").innerHTML='<b>Running (Demo Simulation)...</b>';
   let i=0, it=0;
   const timer=setInterval(()=>{
@@ -765,9 +767,6 @@ function init3DViewer(){
 
   // Setup Live Flow Streamlines
   createStreamlineParticles();
-
-  // Load Initial Aircraft Geometry
-  loadAircraftModel("/models/aircraft.stl");
 
   // Animation Loop
   animate3D();
