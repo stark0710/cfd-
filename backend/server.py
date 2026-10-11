@@ -1,8 +1,11 @@
 """Backend service. GET /health | POST /runs?name=x.step (raw STEP body) | GET /runs/<id>/events (SSE) | GET /runs/<id>/report
 Never fabricates results: missing tools -> error events, status 'failed'."""
-import json, os, queue, shutil, subprocess, threading, uuid
+import json, os, queue, shutil, subprocess, sys, threading, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+sys.path.insert(0, os.path.dirname(__file__))
+venv_site = os.path.join(os.path.dirname(__file__), '..', '.venv', 'lib', f"python{sys.version_info.major}.{sys.version_info.minor}", 'site-packages')
+if os.path.exists(venv_site) and venv_site not in sys.path: sys.path.insert(0, venv_site)
 import pipeline
 
 WORK = os.environ.get("CFD_WORK", "/tmp/cfd-runs"); MAX_MB = int(os.environ.get("MAX_STEP_MB", "50"))
