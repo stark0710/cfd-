@@ -90,7 +90,7 @@ textarea{width:100%;height:140px;font:11.5px ui-monospace,monospace;background:v
       <button type="button" class="btn-sm active" id="btn_m_solid">Solid Skin</button>
       <button type="button" class="btn-sm" id="btn_m_wire" style="background:#475569">CFD Wireframe</button>
       <button type="button" class="btn-sm" id="btn_m_cp" style="background:#475569">Pressure Contours (Cp)</button>
-      <button type="button" class="btn-sm" id="btn_flow_toggle" style="background:#059669">Streamlines: ON</button>
+      <button type="button" class="btn-sm" id="btn_flow_toggle" style="background:#64748b">Streamlines: OFF</button>
       <button type="button" class="btn-sm" id="btn_cam_reset" style="background:var(--mu)">Reset View</button>
     </div>
     <div style="font-size:12px;color:var(--mu);display:flex;gap:12px;align-items:center">
@@ -100,7 +100,7 @@ textarea{width:100%;height:140px;font:11.5px ui-monospace,monospace;background:v
   </div>
   <div id="viewer3d_container">
     <canvas id="viewer3d_canvas"></canvas>
-    <div class="viewer_stat" id="viewer3d_overlay">Rendering 3D model...</div>
+    <div class="viewer_stat" id="viewer3d_overlay">Awaiting CAD upload / solve...</div>
     <div class="viewer_legend" id="viewer3d_legend" style="display:none">
       <div style="font-weight:700;margin-bottom:4px">Surface Pressure (Cp)</div>
       <div style="display:flex;align-items:center;gap:6px;font-size:10px">
@@ -131,27 +131,47 @@ textarea{width:100%;height:140px;font:11.5px ui-monospace,monospace;background:v
 
   <!-- Panel 1: Polar Curves -->
   <div id="panel_polar">
-    <div class="mu" style="margin-bottom:6px">Angle of Attack Polar Sweep (CL vs Alpha, CD vs Alpha, and CL vs CD polar curve computed across AoA):</div>
-    <img id="polar_img" src="/polar.png" alt="Aerodynamic Polar Curves" style="max-width:100%;border-radius:6px;border:1px solid var(--bd);display:block">
+    <div id="polar_placeholder" class="mu" style="padding:40px 15px;text-align:center;background:var(--bg);border-radius:6px;border:1px dashed var(--bd)">
+      ⏳ <b>Awaiting Flow Solution:</b> Aerodynamic polar curves (CL vs AoA, CD vs AoA, and Lift-to-Drag ratio L/D) will generate upon completion of the OpenFOAM Navier-Stokes solve.
+    </div>
+    <div id="polar_content" style="display:none">
+      <div class="mu" style="margin-bottom:6px">Angle of Attack Polar Sweep (CL vs Alpha, CD vs Alpha, and CL vs CD polar curve computed across AoA):</div>
+      <img id="polar_img" src="" alt="Aerodynamic Polar Curves" style="max-width:100%;border-radius:6px;border:1px solid var(--bd);display:none">
+    </div>
   </div>
 
   <!-- Panel 2: Cp Curve -->
   <div id="panel_cp" style="display:none">
-    <div class="mu" style="margin-bottom:6px" id="fc_desc">Mid-span chordwise pressure coefficient distribution (suction peak and pressure recovery):</div>
-    <img id="cp_img" alt="Surface Cp curve" style="max-width:100%;border-radius:6px;border:1px solid var(--bd);display:none">
+    <div id="cp_placeholder" class="mu" style="padding:40px 15px;text-align:center;background:var(--bg);border-radius:6px;border:1px dashed var(--bd)">
+      ⏳ <b>Awaiting Flow Solution:</b> Mid-span surface Cp pressure curve will be plotted once pressure fields are resolved.
+    </div>
+    <div id="cp_content" style="display:none">
+      <div class="mu" style="margin-bottom:6px" id="fc_desc">Mid-span chordwise pressure coefficient distribution (suction peak and pressure recovery):</div>
+      <img id="cp_img" alt="Surface Cp curve" style="max-width:100%;border-radius:6px;border:1px solid var(--bd);display:none">
+    </div>
   </div>
 
   <!-- Panel 3: Drag Breakdown -->
   <div id="panel_drag" style="display:none">
-    <div class="mu" style="margin-bottom:8px">Aerodynamic Drag Decomposition (Pressure form drag vs Viscous skin-friction drag):</div>
-    <canvas id="drag_chart" width="700" height="200"></canvas>
-    <div id="drag_summary" style="margin-top:10px;font-size:13px"></div>
+    <div id="drag_placeholder" class="mu" style="padding:40px 15px;text-align:center;background:var(--bg);border-radius:6px;border:1px dashed var(--bd)">
+      ⏳ <b>Awaiting Flow Solution:</b> Drag force decomposition (Pressure Form Drag vs Viscous Skin Friction Drag) will compute upon completion.
+    </div>
+    <div id="drag_content" style="display:none">
+      <div class="mu" style="margin-bottom:8px">Aerodynamic Drag Decomposition (Pressure form drag vs Viscous skin-friction drag):</div>
+      <canvas id="drag_chart" width="700" height="200"></canvas>
+      <div id="drag_summary" style="margin-top:10px;font-size:13px"></div>
+    </div>
   </div>
 
   <!-- Panel 4: Boundary Layer / y+ -->
   <div id="panel_yplus" style="display:none">
-    <div class="mu" style="margin-bottom:8px">Boundary Layer Resolution &amp; Wall Functions Compliance (Turbulent Wall Law valid range: 30 &le; y+ &le; 300):</div>
-    <div id="yplus_summary" style="padding:12px;background:var(--bg);border-radius:6px;border:1px solid var(--bd)"></div>
+    <div id="yplus_placeholder" class="mu" style="padding:40px 15px;text-align:center;background:var(--bg);border-radius:6px;border:1px dashed var(--bd)">
+      ⏳ <b>Awaiting Flow Solution:</b> Boundary layer resolution &amp; wall y+ compliance metrics will evaluate upon completion.
+    </div>
+    <div id="yplus_content" style="display:none">
+      <div class="mu" style="margin-bottom:8px">Boundary Layer Resolution &amp; Wall Functions Compliance (Turbulent Wall Law valid range: 30 &le; y+ &le; 300):</div>
+      <div id="yplus_summary" style="padding:12px;background:var(--bg);border-radius:6px;border:1px solid var(--bd)"></div>
+    </div>
   </div>
 </section>
 
@@ -382,6 +402,19 @@ $("go").onclick=async()=>{
   startLifecycleTimer();
   setStages(0);
 
+  // Reset Customer Suite graphs & show awaiting placeholders
+  $("polar_placeholder").style.display="block";
+  $("polar_content").style.display="none";
+  $("polar_img").style.display="none";
+  $("cp_placeholder").style.display="block";
+  $("cp_content").style.display="none";
+  $("cp_img").style.display="none";
+  $("drag_placeholder").style.display="block";
+  $("drag_content").style.display="none";
+  $("yplus_placeholder").style.display="block";
+  $("yplus_content").style.display="none";
+  handleStage3DTransition(0);
+
   if(isBackendLive){
     $("status").innerHTML='<b>Running OpenFOAM 2312...</b>';
     log(`[system] Simulation started at ${runStartTime.toLocaleTimeString()}`);
@@ -505,13 +538,24 @@ async function finishLive(runId,status,resObj){
   $("out").innerHTML='<div class="scroll"><table>'+rows.map(x=>`<tr><th>${x[0]}</th><td><b>${x[1]}</b></td></tr>`).join("")+'</table></div>';
   
   // Update Customer Suite Graphs
+  $("polar_placeholder").style.display="none";
+  $("polar_content").style.display="block";
   $("polar_img").src=`/runs/${runId}/polar.png?t=${Date.now()}`;
+  $("polar_img").style.display="block";
+
+  $("cp_placeholder").style.display="none";
+  $("cp_content").style.display="block";
   $("cp_img").src=`/runs/${runId}/cp.png?t=${Date.now()}`;
   $("cp_img").style.display="block";
   $("fc_desc").textContent="Mid-span surface Cp distribution (calculated by OpenFOAM):";
   
+  $("drag_placeholder").style.display="none";
+  $("drag_content").style.display="block";
   // Render Drag Breakdown Chart
   drawDragBreakdown(f.pressure_drag_N||1.649, f.viscous_drag_N||1.185, f.drag_N||2.835);
+
+  $("yplus_placeholder").style.display="none";
+  $("yplus_content").style.display="block";
   // Render y+ summary
   renderYPlusSummary(r&&r.yplus?r.yplus.avg:37.2, l&&l.coverage_pct?l.coverage_pct:99.2);
 
@@ -544,7 +588,23 @@ function finishDemo(V,A,H){
   ];
   $("status").innerHTML='<b>Finished: DEMO ONLY</b> <span class="tag">SYNTHETIC</span>';
   $("out").innerHTML='<div class="scroll"><table>'+rows.map(x=>`<tr><th>${x[0]}</th><td>${x[1]}</td></tr>`).join("")+'</table></div>';
+  
+  $("polar_placeholder").style.display="none";
+  $("polar_content").style.display="block";
+  $("polar_img").src="/polar.png";
+  $("polar_img").style.display="block";
+
+  $("cp_placeholder").style.display="none";
+  $("cp_content").style.display="block";
+  $("cp_img").src="/cp.png";
+  $("cp_img").style.display="block";
+
+  $("drag_placeholder").style.display="none";
+  $("drag_content").style.display="block";
   drawDragBreakdown(1.65, 1.19, 2.84);
+
+  $("yplus_placeholder").style.display="none";
+  $("yplus_content").style.display="block";
   renderYPlusSummary(37.2, 99.2);
 }
 
@@ -642,7 +702,7 @@ function renderYPlusSummary(yplusAvg, coveragePct){
 let scene, camera, renderer, controls;
 let planeMesh=null, solidMat, wireMat, cpMat;
 let streamlineSystem=null, particlePositions=[], particleSpeeds=[], particleSeeds=[];
-let streamlinesVisible=true, flowSpeedMult=1.0;
+let streamlinesVisible=false, flowSpeedMult=1.0;
 let renderMode="solid";
 
 function init3DViewer(){
@@ -846,6 +906,7 @@ function createStreamlineParticles(){
   });
 
   streamlineSystem=new THREE.Points(geom, pMat);
+  streamlineSystem.visible=streamlinesVisible;
   scene.add(streamlineSystem);
 }
 
@@ -987,6 +1048,4 @@ $("btn_cam_reset").onclick=()=>{
 updateFlightConditions();
 checkBackend();
 init3DViewer();
-drawDragBreakdown(1.649, 1.185, 2.835);
-renderYPlusSummary(37.2, 99.2);
 </script></body></html>
