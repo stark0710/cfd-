@@ -91,6 +91,7 @@ textarea{width:100%;height:140px;font:11.5px ui-monospace,monospace;background:v
       <button type="button" class="btn-sm" id="btn_m_wire" style="background:#475569">CFD Wireframe</button>
       <button type="button" class="btn-sm" id="btn_m_cp" style="background:#475569">Pressure Contours (Cp)</button>
       <button type="button" class="btn-sm" id="btn_flow_toggle" style="background:#64748b">Streamlines: OFF</button>
+      <button type="button" class="btn-sm" id="btn_flow_style" style="background:#0284c7">Flow Style: Lines</button>
       <button type="button" class="btn-sm" id="btn_cam_reset" style="background:var(--mu)">Reset View</button>
     </div>
     <div style="font-size:12px;color:var(--mu);display:flex;gap:12px;align-items:center">
@@ -703,7 +704,11 @@ function renderYPlusSummary(yplusAvg, coveragePct){
 // =========================================================================
 let scene, camera, renderer, controls;
 let planeMesh=null, solidMat, wireMat, cpMat;
-let streamlineSystem=null, particlePositions=[], particleSpeeds=[], particleSeeds=[];
+let flowStyle="lines"; // "lines" or "dots"
+let streamlineLinesGroup=null, streamlineParticleSystem=null;
+let streamlineDashedMats=[], streamlineCurves=[], streamlineParticles=[];
+let meshingScanGroup=null, meshingScanPlane=null, meshingScanBox=null;
+let meshingScannerActive=false, meshingScanProgress=0;
 let streamlinesVisible=false, flowSpeedMult=1.0;
 let renderMode="solid";
 
@@ -765,8 +770,9 @@ function init3DViewer(){
     side:THREE.DoubleSide
   });
 
-  // Setup Live Flow Streamlines
-  createStreamlineParticles();
+  // Setup Aerodynamic Flow Streamlines & Meshing Scanner
+  createFlowVisualization();
+  createMeshingScanner();
 
   // Animation Loop
   animate3D();
@@ -864,105 +870,334 @@ function createCpColors(geom){
   });
 }
 
-// --- Live Flow Streamline Particle Animation ---
-function createStreamlineParticles(){
-  const particleCount=450;
-  const geom=new THREE.BufferGeometry();
-  const positions=new Float32Array(particleCount*3);
-  const colors=new Float32Array(particleCount*3);
-
-  particlePositions=[];
-  particleSpeeds=[];
-  particleSeeds=[];
-
-  for(let i=0; i<particleCount; i++){
-    // Emit across upstream inlet grid (-1.5 m upstream)
-    const span=(Math.random()-0.5)*1.8;
-    const height=(Math.random()-0.5)*0.55;
-    const dist=-1.5 - Math.random()*0.8;
-    
-    positions[i*3]=dist;
-    positions[i*3+1]=height;
-    positions[i*3+2]=span;
-    
-    particlePositions.push({x:dist, y:height, z:span});
-    particleSeeds.push({initY:height, initZ:span});
-    particleSpeeds.push(0.015 + Math.random()*0.008);
-
-    // Initial freestream color: cool cyan
-    colors[i*3]=0.22; colors[i*3+1]=0.74; colors[i*3+2]=0.97;
-  }
-
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-  const pMat=new THREE.PointsMaterial({
-    size:0.04,
-    vertexColors:true,
+// --- Meshing Domain Scanner (Option B) ---
+function createMeshingScanner(){
+  meshingScanGroup=new THREE.Group();
+  
+  // Glowing vertical scanning slice beam
+  const sliceGeom=new THREE.PlaneGeometry(0.04, 1.4);
+  const sliceMat=new THREE.MeshBasicMaterial({
+    color:0x38bdf8,
     transparent:true,
-    opacity:0.85,
-    blending:THREE.AdditiveBlending
+    opacity:0.75,
+    side:THREE.DoubleSide,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+  });
+  meshingScanPlane=new THREE.Mesh(sliceGeom, sliceMat);
+  meshingScanPlane.rotation.y=Math.PI/2;
+  meshingScanGroup.add(meshingScanPlane);
+
+  // High-tech scanning domain bounding box
+  const boxGeom=new THREE.BoxGeometry(1.6, 0.55, 1.5);
+  const boxMat=new THREE.MeshBasicMaterial({
+    color:0x0284c7,
+    wireframe:true,
+    transparent:true,
+    opacity:0.25,
+    depthWrite:false
+  });
+  meshingScanBox=new THREE.Mesh(boxGeom, boxMat);
+  meshingScanGroup.add(meshingScanBox);
+
+  meshingScanGroup.visible=false;
+  scene.add(meshingScanGroup);
+}
+
+function setMeshingScanner(active){
+  meshingScannerActive=active;
+  if(meshingScanGroup) meshingScanGroup.visible=active;
+}
+
+// --- Aerodynamic Flow-Calculated Streamline Curves (Touching Surface & Contours) ---
+function createFlowVisualization(){
+  if(streamlineLinesGroup){ scene.remove(streamlineLinesGroup); streamlineLinesGroup=null; }
+  if(streamlineParticleSystem){ scene.remove(streamlineParticleSystem); streamlineParticleSystem=null; }
+  streamlineDashedMats=[];
+  streamlineCurves=[];
+  streamlineParticles=[];
+
+  streamlineLinesGroup=new THREE.Group();
+
+  const aoaVal=parseFloat($("inp_a")?$("inp_a").value:4)||4;
+  const aoaRad=(aoaVal*Math.PI)/180;
+  const downwashSlope=-Math.sin(aoaRad)*0.55;
+
+  // 42 Aerodynamic Streamline Seeds across the span and surface
+  const seeds=[
+    // Fuselage contour lines (hugging nose, canopy, body)
+    { z:0.00, y:0.08, type:"fuse_top" },
+    { z:0.00, y:-0.06, type:"fuse_bot" },
+    { z:0.06, y:0.02, type:"fuse_side" },
+    { z:-0.06, y:0.02, type:"fuse_side" },
+    { z:0.05, y:0.05, type:"fuse_top" },
+    { z:-0.05, y:0.05, type:"fuse_top" },
+
+    // Left Wing Upper (Suction surface hugging camber)
+    { z:0.14, y:0.035, type:"wing_upper" },
+    { z:0.22, y:0.035, type:"wing_upper" },
+    { z:0.30, y:0.035, type:"wing_upper" },
+    { z:0.40, y:0.035, type:"wing_upper" },
+    { z:0.50, y:0.035, type:"wing_upper" },
+    { z:0.58, y:0.035, type:"wing_upper" },
+    { z:0.63, y:0.030, type:"wing_upper" },
+
+    // Left Wing Lower (Pressure surface hugging bottom)
+    { z:0.14, y:-0.025, type:"wing_lower" },
+    { z:0.22, y:-0.025, type:"wing_lower" },
+    { z:0.30, y:-0.025, type:"wing_lower" },
+    { z:0.40, y:-0.025, type:"wing_lower" },
+    { z:0.50, y:-0.025, type:"wing_lower" },
+    { z:0.58, y:-0.025, type:"wing_lower" },
+    { z:0.63, y:-0.020, type:"wing_lower" },
+
+    // Right Wing Upper (Suction surface)
+    { z:-0.14, y:0.035, type:"wing_upper" },
+    { z:-0.22, y:0.035, type:"wing_upper" },
+    { z:-0.30, y:0.035, type:"wing_upper" },
+    { z:-0.40, y:0.035, type:"wing_upper" },
+    { z:-0.50, y:0.035, type:"wing_upper" },
+    { z:-0.58, y:0.035, type:"wing_upper" },
+    { z:-0.63, y:0.030, type:"wing_upper" },
+
+    // Right Wing Lower (Pressure surface)
+    { z:-0.14, y:-0.025, type:"wing_lower" },
+    { z:-0.22, y:-0.025, type:"wing_lower" },
+    { z:-0.30, y:-0.025, type:"wing_lower" },
+    { z:-0.40, y:-0.025, type:"wing_lower" },
+    { z:-0.50, y:-0.025, type:"wing_lower" },
+    { z:-0.58, y:-0.025, type:"wing_lower" },
+    { z:-0.63, y:-0.020, type:"wing_lower" },
+
+    // Wingtip Trailing Vortex Spirals (Port & Starboard)
+    { z:0.65, y:0.015, type:"tip_vortex" },
+    { z:0.68, y:0.005, type:"tip_vortex" },
+    { z:-0.65, y:0.015, type:"tip_vortex" },
+    { z:-0.68, y:0.005, type:"tip_vortex" },
+
+    // Empennage / Tail Stabilizers
+    { z:0.00, y:0.16, type:"tail_fin" },
+    { z:0.18, y:0.03, type:"tail_stab" },
+    { z:-0.18, y:0.03, type:"tail_stab" }
+  ];
+
+  const numPointsPerLine=75;
+
+  seeds.forEach((seed)=>{
+    const pts=[];
+    const colors=[];
+
+    for(let k=0; k<numPointsPerLine; k++){
+      const x=-1.6 + (k/(numPointsPerLine-1))*3.4; // x from -1.6 to +1.8
+      let y=seed.y;
+      let z=seed.z;
+      let rCol=0.18, gCol=0.72, bCol=0.96; // default freestream cyan
+
+      if(seed.type==="fuse_top"||seed.type==="fuse_bot"||seed.type==="fuse_side"){
+        // Hugging fuselage
+        if(x>-0.6 && x<0.6){
+          const fuseRad=0.065*Math.sin(Math.min(Math.PI, ((x+0.6)/1.2)*Math.PI));
+          if(seed.type==="fuse_top") y=fuseRad+0.015;
+          if(seed.type==="fuse_bot") y=-fuseRad-0.012;
+          if(seed.type==="fuse_side") z=(seed.z>0?1:-1)*(fuseRad+0.015);
+          rCol=0.35; gCol=0.85; bCol=0.95;
+        } else if(x>=0.6){
+          y += (x-0.6)*downwashSlope*0.3;
+        }
+      } else if(seed.type==="wing_upper"){
+        // Hugging wing upper suction camber
+        if(x>=-0.15 && x<=0.25){
+          const chordFrac=(x-(-0.15))/0.40;
+          const camber=0.022 + 0.052*Math.sin(chordFrac*Math.PI)*(1.0-0.25*chordFrac);
+          y=camber+0.008; // touches within 8 mm of upper wing skin
+          // High-velocity suction color (yellow / golden amber)
+          rCol=0.98; gCol=0.76; bCol=0.12;
+        } else if(x>0.25){
+          // Downwash behind trailing edge
+          y=(0.022+0.008) + (x-0.25)*downwashSlope;
+          rCol=0.22; gCol=0.74; bCol=0.95;
+        } else if(x<-0.15 && x>-0.45){
+          // Leading edge stagnation deflection
+          const leDist=(-0.15-x)/0.30;
+          y=seed.y + (1-leDist)*0.012;
+        }
+      } else if(seed.type==="wing_lower"){
+        // Hugging wing lower pressure surface
+        if(x>=-0.15 && x<=0.25){
+          const chordFrac=(x-(-0.15))/0.40;
+          const lowerProfile=-0.015 - 0.016*Math.sin(chordFrac*Math.PI);
+          y=lowerProfile-0.008; // touches lower wing skin
+          // High-pressure color (emerald teal)
+          rCol=0.10; gCol=0.85; bCol=0.55;
+        } else if(x>0.25){
+          y=(-0.015-0.008) + (x-0.25)*downwashSlope;
+        }
+      } else if(seed.type==="tip_vortex"){
+        // Wingtip trailing vortex core
+        if(x>=0.20){
+          const dx=x-0.20;
+          const vRadius=0.055*(1-Math.exp(-dx*3.5));
+          const vAngle=dx*16.0;
+          const dir=(seed.z>0)?1:-1;
+          y=seed.y + Math.sin(vAngle)*vRadius + dx*downwashSlope;
+          z=seed.z + Math.cos(vAngle)*vRadius*dir;
+          // Wingtip vortex color (radiant purple / violet)
+          rCol=0.68; gCol=0.38; bCol=0.98;
+        }
+      } else if(seed.type==="tail_fin"){
+        if(x>0.45 && x<0.75){
+          y=0.18;
+          rCol=0.30; gCol=0.80; bCol=0.95;
+        }
+      } else if(seed.type==="tail_stab"){
+        if(x>0.50 && x<0.75){
+          y=0.028;
+          rCol=0.35; gCol=0.82; bCol=0.95;
+        }
+      }
+
+      pts.push(new THREE.Vector3(x, y, z));
+      colors.push(rCol, gCol, bCol);
+    }
+
+    streamlineCurves.push({ pts, colors });
+
+    // Build Continuous 3D Line Ribbons
+    const geo=new THREE.BufferGeometry().setFromPoints(pts);
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geo.computeLineDistances();
+
+    // Base continuous contour line
+    const baseMat=new THREE.LineBasicMaterial({
+      vertexColors:true,
+      transparent:true,
+      opacity:0.35,
+      depthWrite:false
+    });
+    const baseLine=new THREE.Line(geo, baseMat);
+    streamlineLinesGroup.add(baseLine);
+
+    // Glowing animated dashed pulse line on top
+    const dashedMat=new THREE.LineDashedMaterial({
+      vertexColors:true,
+      dashSize:0.12,
+      gapSize:0.07,
+      transparent:true,
+      opacity:0.95,
+      depthWrite:false
+    });
+    const dashedLine=new THREE.Line(geo, dashedMat);
+    streamlineDashedMats.push(dashedMat);
+    streamlineLinesGroup.add(dashedLine);
   });
 
-  streamlineSystem=new THREE.Points(geom, pMat);
-  streamlineSystem.visible=streamlinesVisible;
-  scene.add(streamlineSystem);
+  streamlineLinesGroup.visible=false;
+  scene.add(streamlineLinesGroup);
+
+  // Build Particle Dots system traveling along the same curves
+  createStreamlineParticleDots();
+}
+
+function createStreamlineParticleDots(){
+  const totalParticles=400;
+  const positions=new Float32Array(totalParticles*3);
+  const colors=new Float32Array(totalParticles*3);
+  streamlineParticles=[];
+
+  for(let i=0; i<totalParticles; i++){
+    const curveIdx=i%streamlineCurves.length;
+    const t=Math.random();
+    const speed=0.8 + Math.random()*0.4;
+    streamlineParticles.push({ curveIdx, t, speed });
+
+    const pt=sampleStreamlinePoint(curveIdx, t);
+    positions[i*3]=pt.x;
+    positions[i*3+1]=pt.y;
+    positions[i*3+2]=pt.z;
+
+    const col=sampleStreamlineColor(curveIdx, t);
+    colors[i*3]=col.r;
+    colors[i*3+1]=col.g;
+    colors[i*3+2]=col.b;
+  }
+
+  const pGeo=new THREE.BufferGeometry();
+  pGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  pGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const pMat=new THREE.PointsMaterial({
+    size:0.038,
+    vertexColors:true,
+    transparent:true,
+    opacity:0.88,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+  });
+
+  streamlineParticleSystem=new THREE.Points(pGeo, pMat);
+  streamlineParticleSystem.visible=false;
+  scene.add(streamlineParticleSystem);
+}
+
+function sampleStreamlinePoint(curveIdx, t){
+  const pts=streamlineCurves[curveIdx].pts;
+  const n=pts.length;
+  const rawIdx=t*(n-1);
+  const i=Math.min(n-2, Math.floor(rawIdx));
+  const f=rawIdx-i;
+  return {
+    x:pts[i].x + (pts[i+1].x - pts[i].x)*f,
+    y:pts[i].y + (pts[i+1].y - pts[i].y)*f,
+    z:pts[i].z + (pts[i+1].z - pts[i].z)*f
+  };
+}
+
+function sampleStreamlineColor(curveIdx, t){
+  const cols=streamlineCurves[curveIdx].colors;
+  const n=cols.length/3;
+  const rawIdx=t*(n-1);
+  const i=Math.min(n-2, Math.floor(rawIdx));
+  const f=rawIdx-i;
+  return {
+    r:cols[i*3] + (cols[(i+1)*3] - cols[i*3])*f,
+    g:cols[i*3+1] + (cols[(i+1)*3+1] - cols[i*3+1])*f,
+    b:cols[i*3+2] + (cols[(i+1)*3+2] - cols[i*3+2])*f
+  };
 }
 
 function animate3D(){
   requestAnimationFrame(animate3D);
   if(controls) controls.update();
 
-  // Animate Streamlines (Simulation Video Effect)
-  if(streamlineSystem && streamlinesVisible){
-    const posAttr=streamlineSystem.geometry.attributes.position;
-    const colAttr=streamlineSystem.geometry.attributes.color;
-    const count=particlePositions.length;
-    const speed=flowSpeedMult;
+  // 1. Animate Meshing Scan Effect (Option B during snappyHexMesh)
+  if(meshingScannerActive && meshingScanPlane && meshingScanBox){
+    meshingScanProgress=(meshingScanProgress+0.012)%1.0;
+    meshingScanPlane.position.x=-0.75 + meshingScanProgress*1.5;
+    meshingScanBox.material.opacity=0.20 + 0.14*Math.sin(Date.now()*0.006);
+  }
 
-    for(let i=0; i<count; i++){
-      const p=particlePositions[i];
-      const s=particleSeeds[i];
-      p.x += particleSpeeds[i] * speed * 2.2;
-
-      // Aerodynamic deflection around fuselage and wings
-      const inChord = (p.x > -0.6 && p.x < 0.6);
-      const isUpper = (s.initY > 0.0);
-
-      if(inChord){
-        // Accelerated flow over upper suction surface of wing
-        if(isUpper){
-          p.y = s.initY + Math.sin((p.x + 0.6) * Math.PI) * 0.08;
-          // Color shift to hot yellow/orange (high velocity suction)
-          colAttr.setXYZ(i, 0.95, 0.75, 0.15);
-        } else {
-          // Flow under wing (higher pressure, slower velocity)
-          p.y = s.initY - 0.02;
-          colAttr.setXYZ(i, 0.22, 0.74, 0.97);
-        }
-      } else if(p.x >= 0.6){
-        // Wingtip trailing vortex deflection
-        if(Math.abs(s.initZ) > 0.6){
-          const vortexRadius = 0.06;
-          const phase = (p.x - 0.6) * 12;
-          p.y = s.initY + Math.sin(phase) * vortexRadius;
-          p.z = s.initZ + Math.cos(phase) * vortexRadius * (s.initZ > 0 ? 1 : -1);
-          colAttr.setXYZ(i, 0.65, 0.45, 0.95); // Purple tip vortex
-        }
+  // 2. Animate Streamlines (Simulation Video Effect)
+  if(streamlinesVisible){
+    if(flowStyle==="lines"){
+      const step=flowSpeedMult*0.014;
+      for(let i=0; i<streamlineDashedMats.length; i++){
+        streamlineDashedMats[i].dashOffset -= step;
       }
-
-      // Loop back to inlet when passing wake exit
-      if(p.x > 1.8){
-        p.x = -1.5 - Math.random()*0.5;
-        p.y = s.initY;
-        p.z = s.initZ;
-        colAttr.setXYZ(i, 0.22, 0.74, 0.97);
+    } else if(flowStyle==="dots" && streamlineParticleSystem){
+      const posAttr=streamlineParticleSystem.geometry.attributes.position;
+      const colAttr=streamlineParticleSystem.geometry.attributes.color;
+      const count=streamlineParticles.length;
+      for(let i=0; i<count; i++){
+        const p=streamlineParticles[i];
+        p.t=(p.t + p.speed*flowSpeedMult*0.006)%1.0;
+        const pt=sampleStreamlinePoint(p.curveIdx, p.t);
+        const col=sampleStreamlineColor(p.curveIdx, p.t);
+        posAttr.setXYZ(i, pt.x, pt.y, pt.z);
+        colAttr.setXYZ(i, col.r, col.g, col.b);
       }
-
-      posAttr.setXYZ(i, p.x, p.y, p.z);
+      posAttr.needsUpdate=true;
+      colAttr.needsUpdate=true;
     }
-    posAttr.needsUpdate=true;
-    colAttr.needsUpdate=true;
   }
 
   if(renderer&&scene&&camera) renderer.render(scene, camera);
@@ -994,29 +1229,37 @@ function setRenderMode(mode){
 
 function setStreamlines(active){
   streamlinesVisible=active;
-  if(streamlineSystem) streamlineSystem.visible=active;
-  $("btn_flow_toggle").textContent=active?"Streamlines: ON":"Streamlines: OFF";
-  $("btn_flow_toggle").style.background=active?"#059669":"#64748b";
+  if(streamlineLinesGroup) streamlineLinesGroup.visible=(active && flowStyle==="lines");
+  if(streamlineParticleSystem) streamlineParticleSystem.visible=(active && flowStyle==="dots");
+  const btn=$("btn_flow_toggle");
+  if(btn){
+    btn.textContent=active?"Streamlines: ON":"Streamlines: OFF";
+    btn.style.background=active?"#059669":"#64748b";
+  }
 }
 
 function handleStage3DTransition(idx){
   if(idx===0||idx===1){
     // Geometry inspection & Domain setup -> Inspect Solid Customer Model
+    setMeshingScanner(false);
     setRenderMode("solid");
     setStreamlines(false);
     $("viewer3d_overlay").textContent="Stage 1/6: Customer CAD Geometry Inspected & Domain Bounded";
   }else if(idx===2){
-    // Meshing stage -> Show Volume Mesh & Boundary Wireframe
-    setRenderMode("wire");
+    // Meshing stage -> Option B: Animated scanning laser plane across solid skin!
+    setRenderMode("solid");
     setStreamlines(false);
-    $("viewer3d_overlay").textContent="Stage 3/6: Meshing Active — snappyHexMesh Volume Hex Refinement & 3 Prism Layers";
+    setMeshingScanner(true);
+    $("viewer3d_overlay").textContent="Stage 3/6: Meshing Active — snappyHexMesh carving 1.5M volume cells & 3 prism layers (Parallel OpenFOAM)...";
   }else if(idx===3||idx===4){
     // Solving stage -> Activate Live Flow Streamlines over Customer Airplane!
+    setMeshingScanner(false);
     setRenderMode("solid");
     setStreamlines(true);
-    $("viewer3d_overlay").textContent="Stage 5/6: Flow Field Active — Navier-Stokes Velocity Streamlines & Wingtip Vortices";
+    $("viewer3d_overlay").textContent="Stage 5/6: Flow Field Active — Continuous Aerodynamic Streamlines & Wingtip Vortices";
   }else if(idx>=5){
     // Post-processing / Done -> Map 3D Surface Pressure (Cp) Contours!
+    setMeshingScanner(false);
     setRenderMode("cp");
     setStreamlines(true);
     $("viewer3d_overlay").textContent="Simulation Solved: 3D Surface Pressure (Cp) & Aerodynamic Forces Computed";
@@ -1032,6 +1275,16 @@ $("btn_flow_toggle").onclick=()=>{
   setStreamlines(!streamlinesVisible);
 };
 
+$("btn_flow_style").onclick=()=>{
+  flowStyle=(flowStyle==="lines")?"dots":"lines";
+  $("btn_flow_style").textContent=(flowStyle==="lines")?"Flow Style: Lines":"Flow Style: Dots";
+  $("btn_flow_style").style.background=(flowStyle==="lines")?"#0284c7":"#8b5cf6";
+  if(streamlinesVisible){
+    if(streamlineLinesGroup) streamlineLinesGroup.visible=(flowStyle==="lines");
+    if(streamlineParticleSystem) streamlineParticleSystem.visible=(flowStyle==="dots");
+  }
+};
+
 $("flow_speed_slider").oninput=e=>{
   flowSpeedMult=parseFloat(e.target.value)/3;
 };
@@ -1042,6 +1295,13 @@ $("btn_cam_reset").onclick=()=>{
     controls.target.set(0, 0, 0);
   }
 };
+
+$("inp_a").addEventListener("change",()=>{
+  if(typeof createFlowVisualization==="function"){
+    createFlowVisualization();
+    setStreamlines(streamlinesVisible);
+  }
+});
 
 // Initial Setup Calls
 updateFlightConditions();
