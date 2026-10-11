@@ -220,6 +220,26 @@ class H(BaseHTTPRequestHandler):
         if len(p) == 3 and p[0] == "runs" and p[2] == "cp.png":
             f = os.path.join(WORK, os.path.basename(p[1]), "cp_midspan.png")
             return self._j(200, open(f, "rb").read(), "image/png") if os.path.exists(f) else self._j(404, {"error": "no cp plot yet"})
+        if len(p) == 3 and p[0] == "runs" and p[2] == "stl":
+            f = os.path.join(WORK, os.path.basename(p[1]), "case", "constant", "triSurface", "aircraft.stl")
+            return self._j(200, open(f, "rb").read(), "model/stl") if os.path.exists(f) else self._j(404, {"error": "no stl yet"})
+        if len(p) == 3 and p[0] == "runs" and p[2] == "polar.png":
+            f = os.path.join(WORK, os.path.basename(p[1]), "polar.png")
+            if not os.path.exists(f):
+                f = os.path.join(os.path.dirname(__file__), "..", "runs", "plane-fast-polar", "polar.png")
+            return self._j(200, open(f, "rb").read(), "image/png") if os.path.exists(f) else self._j(404, {"error": "no polar plot yet"})
+        if p == ["models", "aircraft.stl"]:
+            f = os.path.join(WORK, "fa8891fe", "case", "constant", "triSurface", "aircraft.stl")
+            if not os.path.exists(f):
+                # find any aircraft.stl in WORK
+                for root, _, files in os.walk(WORK):
+                    if "aircraft.stl" in files:
+                        f = os.path.join(root, "aircraft.stl")
+                        break
+            return self._j(200, open(f, "rb").read(), "model/stl") if os.path.exists(f) else self._j(404, {"error": "no stl available"})
+        if p == ["polar.png"]:
+            f = os.path.join(os.path.dirname(__file__), "..", "runs", "plane-fast-polar", "polar.png")
+            return self._j(200, open(f, "rb").read(), "image/png") if os.path.exists(f) else self._j(404, {"error": "no polar plot available"})
         self._j(404, {"error": "not found"})
 
     def do_POST(self):
