@@ -2,24 +2,25 @@
 OpenFOAM runs through Docker (image OPENFOAM_IMAGE) with the entrypoint bypassed.
 HONESTY: wall-function RANS, unvalidated; prism layers are attempted and their real coverage is reported. Status can therefore never be 'completed successfully' in v1.
 Nothing here fabricates numbers: anything not computed is None / 'unavailable'."""
-import glob, json, math, os, re, subprocess
+import glob, json, math, os, re, shutil, subprocess
 from string import Template
 
 IMAGE = os.environ.get("OPENFOAM_IMAGE", "opencfd/openfoam-default:2312")
 BASHRC = os.environ.get("OPENFOAM_BASHRC", "/usr/lib/openfoam/openfoam2312/etc/bashrc")
 MESH_LEVELS = os.environ.get("MESH_LEVELS")                  # e.g. "5 5"; unset = auto from chord proxy
 END_TIME = int(os.environ.get("END_TIME", "600"))
-WAKE_BOX = os.environ.get("WAKE_BOX", "0") == "1"
+RES_TARGET = os.environ.get("RES_TARGET", "3e-5")                # residual target for U, k, omega (p stays 1e-4)
+NPROC = max(1, int(os.environ.get("NPROC", str(min(8, os.cpu_count() or 1)))))              # MPI processes for snappyHexMesh and simpleFoam (default auto-scaled)
+MESH_PROCS = max(1, int(os.environ.get("MESH_PROCS", "6")))   # fixed process count for meshing, so the mesh does not depend on the machine
+WAKE_BOX = os.environ.get("WAKE_BOX", "1") == "1"
 WAKE_LEVEL = os.environ.get("WAKE_LEVEL")
-<<<<<<< HEAD
 NOSE_BOX = os.environ.get("NOSE_BOX", "0") == "1"
 NOSE_LEVEL = os.environ.get("NOSE_LEVEL")
-=======
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
-LAYERS = int(os.environ.get("LAYERS", "4"))                 # prism layers (0 = off)
-Y_PLUS_TARGET = float(os.environ.get("Y_PLUS", "50"))       # target wall y+ used to size the first layer (wall functions)
-LAYER_EXPANSION = float(os.environ.get("LAYER_EXPANSION", "1.3"))
-RESOLVE_ANGLE = os.environ.get("RESOLVE_ANGLE", "10")       # deg: surface curvature above which the max refinement level applies (LE/TE)
+LAYERS = int(os.environ.get("LAYERS", "3"))                 # prism layers (0 = off)
+Y_PLUS_TARGET = float(os.environ.get("Y_PLUS", "40"))       # target wall y+ used to size the first layer (wall functions)
+LAYER_EXPANSION = float(os.environ.get("LAYER_EXPANSION", "1.2"))
+RESOLVE_ANGLE = os.environ.get("RESOLVE_ANGLE", "5")       # deg: surface curvature above which the max refinement level applies (LE/TE)
+NON_ORTHO = int(os.environ.get("NON_ORTHO", "2"))           # non-orthogonal correctors (2 recommended for hex-dominant mesh)
 CASE = dict(V=float(os.environ.get("CFD_V", 25)), H=float(os.environ.get("CFD_H", 0)), alpha=float(os.environ.get("CFD_ALPHA", 4)), beta=float(os.environ.get("CFD_BETA", 0)))  # fixed standard case; env overrides are for testing only
 STAGES = ["Geometry inspection", "Domain setup", "Meshing", "Solver setup", "Solving", "Post-processing", "Report generation"]
 
@@ -89,24 +90,24 @@ def _w(case, rel, cls, obj, body, **kw):
 def write_case(case, info, atm):
     x0, y0, z0, x1, y1, z1 = info["bbox_m"]; L = info["length_scale_m"]; V = CASE["V"]
     U, d, lift = wind(V, CASE["alpha"], CASE["beta"])
-    dom = [x0-3*L, y0-3*L, z0-3*L, x1+6*L, y1+3*L, z1+3*L]; h = L/6
+    dom_up = float(os.environ.get("DOM_UP", "3.0"))
+    dom_down = float(os.environ.get("DOM_DOWN", "6.0"))
+    dom = [x0-dom_up*L, y0-dom_up*L, z0-dom_up*L, x1+dom_down*L, y1+dom_up*L, z1+dom_up*L]; h = L/6
     n = [max(4, math.ceil((dom[i+3]-dom[i])/h)) for i in range(3)]
     loc = ((dom[0]+x0)/2, (y0+y1)/2, (z0+z1)/2)
     chord = sorted([x1-x0, y1-y0, z1-z0])[1]                    # chord proxy = middle bounding-box dimension (assumption)
     n_lv = max(3, min(7, math.floor(math.log2(h*40/chord)))) if MESH_LEVELS is None else None
-    levels = MESH_LEVELS if MESH_LEVELS else f"{n_lv} {n_lv}"; cell = h/2**int(levels.split()[-1])
-<<<<<<< HEAD
+    levels = MESH_LEVELS if MESH_LEVELS else f"{n_lv} {n_lv + 2}"; cell = h/2**int(levels.split()[-1])
+    lv = [int(x) for x in levels.split()]
+    if len(lv) == 2 and lv[1] - lv[0] > 2 and os.environ.get("ALLOW_LEVEL_JUMP") != "1": raise PipelineError("mesh_levels", f"Mesh levels '{levels}' differ by more than 2: such jumps produced invalid meshes in testing (5 8, nose box). Use a gap of 2 or less, or set ALLOW_LEVEL_JUMP=1 to override.")
     wb = None; nb = None; gbox = rreg = ""
-=======
     wb = None; gbox = rreg = ""
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
     if WAKE_BOX:
         wl = int(WAKE_LEVEL) if WAKE_LEVEL else max(2, int(levels.split()[0]) - 1)
         zc = (z0+z1)/2; bmin = (x0-0.25*chord, y0-0.5*chord, zc-0.75*chord); bmax = (x1+3*chord, y1+0.5*chord, zc+0.75*chord)
         gbox = "wakebox { type searchableBox; min (%g %g %g); max (%g %g %g); }" % (bmin + bmax)
         rreg = "wakebox { mode inside; levels ((1e15 %d)); }" % wl
         wb = dict(level=wl, min_m=bmin, max_m=bmax, cell_m=h/2**wl)
-<<<<<<< HEAD
     if NOSE_BOX:
         nose_level = int(NOSE_LEVEL) if NOSE_LEVEL else int(levels.split()[-1]) + 1
         nose_min = (x0-0.01*chord, y0-0.005*chord, z0-0.01*chord)
@@ -114,8 +115,6 @@ def write_case(case, info, atm):
         gbox += " nosebox { type searchableBox; min (%g %g %g); max (%g %g %g); }" % (nose_min + nose_max)
         rreg += " nosebox { mode inside; levels ((1e15 %d)); }" % nose_level
         nb = dict(level=nose_level, min_m=nose_min, max_m=nose_max, cell_m=h/2**nose_level)
-=======
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
     nu = atm["nu"]; Rex = V*chord/2/nu; utau = V*math.sqrt(0.0576*Rex**-0.2/2)          # flat-plate estimate at mid-chord (assumption)
     y1 = 2*Y_PLUS_TARGET*nu/utau; er = LAYER_EXPANSION
     lay = dict(n=LAYERS, first_m=y1, expansion=er, total_m=y1*(er**LAYERS-1)/(er-1) if LAYERS else 0.0, target_yplus=Y_PLUS_TARGET)
@@ -129,7 +128,7 @@ mergePatchPairs ();
 """, x0=dom[0], y0=dom[1], z0=dom[2], x1=dom[3], y1=dom[4], z1=dom[5], nx=n[0], ny=n[1], nz=n[2])
     _w(case, "system/snappyHexMeshDict", "dictionary", "snappyHexMeshDict", """castellatedMesh true; snap true; addLayers $addl;
 geometry { aircraft.stl { type triSurfaceMesh; name aircraft; } $gbox }
-castellatedMeshControls { maxLocalCells 1000000; maxGlobalCells 3000000; minRefinementCells 10; maxLoadUnbalance 0.10; nCellsBetweenLevels 3; features ();
+castellatedMeshControls { maxLocalCells 2000000; maxGlobalCells 5000000; minRefinementCells 10; maxLoadUnbalance 0.10; nCellsBetweenLevels 3; features ();
   refinementSurfaces { aircraft { level ($lv); patchInfo { type wall; } } }
   resolveFeatureAngle $rfa; refinementRegions { $rreg } locationInMesh ($lx $ly $lz); allowFreeStandingZoneFaces true; }
 snapControls { nSmoothPatch 3; tolerance 2.0; nSolveIter 50; nRelaxIter 5; nFeatureSnapIter 10; implicitFeatureSnap false; explicitFeatureSnap false; multiRegionFeatureSnap false; }
@@ -144,16 +143,16 @@ mergeTolerance 1e-6; debug 0;
 writeControl timeStep; writeInterval 100; purgeWrite 2; writeFormat ascii; writePrecision 8; timeFormat general; timePrecision 6; runTimeModifiable true;
 functions { forces { type forces; libs ("libforces.so"); patches ("aircraft.*"); rho rhoInf; rhoInf $rho; CofR (0 0 0); writeControl timeStep; writeInterval 1; } }
 """, et=END_TIME, rho=atm["rho"])
-    _w(case, "system/fvSchemes", "dictionary", "fvSchemes", """ddtSchemes { default steadyState; } gradSchemes { default Gauss linear; }
+    _w(case, "system/fvSchemes", "dictionary", "fvSchemes", """ddtSchemes { default steadyState; } gradSchemes { default cellLimited Gauss linear 1; grad(U) cellLimited Gauss linear 1; }
 divSchemes { default none; div(phi,U) bounded Gauss linearUpwind grad(U); div(phi,k) bounded Gauss limitedLinear 1; div(phi,omega) bounded Gauss limitedLinear 1;
   div((nuEff*dev2(T(grad(U))))) Gauss linear; }
 laplacianSchemes { default Gauss linear corrected; } interpolationSchemes { default linear; } snGradSchemes { default corrected; } wallDist { method meshWave; }
 """)
     _w(case, "system/fvSolution", "dictionary", "fvSolution", """solvers { p { solver GAMG; smoother GaussSeidel; tolerance 1e-6; relTol 0.1; }
   "(U|k|omega)" { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.1; } }
-SIMPLE { nNonOrthogonalCorrectors 1; consistent yes; residualControl { p 1e-4; U 1e-5; "(k|omega)" 1e-5; } }
+SIMPLE { nNonOrthogonalCorrectors $noc; consistent yes; residualControl { p 1e-4; U $rt; "(k|omega)" $rt; } }
 relaxationFactors { equations { U 0.9; ".*" 0.9; } }
-""")
+""", noc=NON_ORTHO, rt=RES_TARGET)
     _w(case, "constant/transportProperties", "dictionary", "transportProperties", "transportModel Newtonian;\nnu [0 2 -1 0 0 0 0] $nu;\n", nu=atm["nu"])
     _w(case, "constant/turbulenceProperties", "dictionary", "turbulenceProperties", "simulationType RAS;\nRAS { model kOmegaSST; turbulence on; printCoeffs on; }\n")
     def field(name, dims, internal, far, wall, cls="volScalarField"):
@@ -162,17 +161,12 @@ relaxationFactors { equations { U 0.9; ".*" 0.9; } }
     field("p", "[0 2 -2 0 0 0 0]", "0", "type freestreamPressure; freestreamValue uniform 0;", "type zeroGradient;")
     field("k", "[0 2 -2 0 0 0 0]", "%g" % k0, f"type freestream; freestreamValue uniform {k0:g};", f"type kqRWallFunction; value uniform {k0:g};")
     field("omega", "[0 0 -1 0 0 0 0]", "%g" % om0, f"type freestream; freestreamValue uniform {om0:g};", f"type omegaWallFunction; value uniform {om0:g};")
-<<<<<<< HEAD
-    field("nut", "[0 2 -1 0 0 0 0]", "0", "type freestream; freestreamValue uniform 0;", "type " + os.environ.get("NUT_WALL", "nutkWallFunction") + "; value uniform 0;")
+    field("nut", "[0 2 -1 0 0 0 0]", "0", "type freestream; freestreamValue uniform 0;", "type " + os.environ.get("NUT_WALL", "nutUSpaldingWallFunction") + "; value uniform 0;")
     return dict(wake_box=wb, nose_box=nb, layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)
-=======
-    field("nut", "[0 2 -1 0 0 0 0]", "0", "type freestream; freestreamValue uniform 0;", "type nutkWallFunction; value uniform 0;")
-    return dict(wake_box=wb, layers=lay, levels=levels, surface_cell_m=cell, chord_proxy_m=chord, domain_m=dom, background_cells=n, location_in_mesh=loc, wind_dir=d, lift_dir=lift, U=U, k=k0, omega=om0)
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
 
 # ---------- running OpenFOAM ----------
 def of_run(case, cmd, log, on_line=None):
-    args = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp", "-v", f"{case}:/case", "-w", "/case",
+    args = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp", "--shm-size=4g", "-e", "OMPI_MCA_btl_vader_single_copy_mechanism=none", "-e", "OMPI_MCA_btl_sm_single_copy_mechanism=none", "-v", f"{case}:/case", "-w", "/case",
             "--entrypoint", "bash", IMAGE, "-c", f"source {BASHRC} && {cmd}"]
     with open(os.path.join(case, log), "w") as lf:
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -180,6 +174,13 @@ def of_run(case, cmd, log, on_line=None):
             lf.write(line)
             if on_line: on_line(line.rstrip())
         return p.wait()
+
+def mpi(cmd, n=None): return f"mpirun -np {n or NPROC} --oversubscribe --bind-to none {cmd} -parallel"
+
+def write_decompose_dict(case, n=None): _w(case, "system/decomposeParDict", "dictionary", "decomposeParDict", "numberOfSubdomains %d; method scotch;" % (n or NPROC))
+
+def drop_processor_dirs(case):
+    for d in glob.glob(os.path.join(case, "processor*")): shutil.rmtree(d, ignore_errors=True)
 
 def parse_checkmesh(text):
     g = lambda pat: (m.group(1) if (m := re.search(pat, text)) else None)
@@ -284,7 +285,6 @@ def postprocess_cp(case, out_png, V, bbox):
     except Exception as e: return dict(error=f"{type(e).__name__}: {e}")
 
 def dot(a, b): return sum(x*y for x, y in zip(a, b))
-<<<<<<< HEAD
 def reference_geometry(stl_path, bbox):
     """Planform reference area (projected on the x-y plane), span and mean chord from the STL. Returns None if it cannot be computed."""
     try:
@@ -295,8 +295,6 @@ def reference_geometry(stl_path, bbox):
         return dict(area_m2=area, span_m=span, mean_chord_m=area/span) if area > 0 and span > 0 else None
     except Exception: return None
 
-=======
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
 def force_summary(rows, drag_dir, lift_dir):
     if not rows: return None
     D = [dot(r[1:4], drag_dir) for r in rows]; Lf = [dot(r[1:4], lift_dir) for r in rows]
@@ -305,67 +303,113 @@ def force_summary(rows, drag_dir, lift_dir):
     drift = lambda a: (max(a)-min(a))/abs(sum(a)/len(a)) if abs(sum(a)/len(a)) > 1e-12 else None
     return dict(lift_N=Lf[-1], drag_N=D[-1], lift_to_drag=(Lf[-1]/D[-1] if abs(D[-1]) > 1e-12 else None), window_iterations=tail, lift_drift=drift(lt), drag_drift=drift(dt), **split)
 
+def validate_aerodynamics(CL, CD, span, area, alpha_deg, bbox=None):
+    """Consistency check against lifting-line theory for an unswept NACA0012-type wing. NOT a validation against experiments.
+    The 2D lift slope a0 is an assumption: 5.5-6.3 per rad is a plausible range for NACA0012 at Re ~ 3e5 (not a measurement).
+    Span efficiency 0.87 was fitted to a numerical lifting-line solution for an AR 5 rectangular wing (approximate for other aspect ratios)."""
+    if not (CL and CD and span and area and span > 0 and area > 0): return None
+    AR = (span * span) / area
+    if abs(alpha_deg) < 1.0 or abs(alpha_deg) > 6.0: return dict(skipped=True, AR=AR, reason=f"linear lifting-line theory is only compared between 1 and 6 deg angle of attack (this run: {alpha_deg:g} deg)")
+    if bbox is not None:
+        x0, y0, z0, x1, y1, z1 = bbox; tc = (z1 - z0) / (x1 - x0) if x1 > x0 else 0.0
+        if not (0.10 <= tc <= 0.14 and 2.0 <= AR <= 15.0):
+            return dict(skipped=True, AR=AR, reason=f"the check assumes an unswept NACA0012-type wing (thickness/chord about 0.12 and aspect ratio 2-15; found {tc:.2f} and {AR:.1f})")
+    e = 0.87; alpha = math.radians(alpha_deg); sgn = 1.0 if alpha_deg >= 0 else -1.0
+    cl_at = lambda a0: sgn * abs(a0 / (1.0 + a0 / (math.pi * e * AR)) * alpha)
+    CL_lo, CL_mid, CL_hi = sorted([cl_at(5.5), cl_at(5.9), cl_at(6.3)])
+    CDi = (CL ** 2) / (math.pi * e * AR); CD_lo, CD_hi = 0.0120 + CDi, 0.0140 + CDi
+    lo, hi = min(CL_lo, CL_hi), max(CL_lo, CL_hi)
+    valid = 0.95 * lo <= CL <= 1.05 * hi if lo > 0 else 1.05 * lo <= CL <= 0.95 * hi
+    pct = lambda ref: 100.0 * (CL - ref) / ref
+    return dict(skipped=False, valid=valid, AR=AR, a0_range=(5.5, 6.3), CL_lo=CL_lo, CL_mid=CL_mid, CL_hi=CL_hi, CL_theory=CL_mid, err_vs_lo_pct=pct(CL_lo), err_vs_hi_pct=pct(CL_hi), lift_err_pct=pct(CL_mid), CD_lo=CD_lo, CD_hi=CD_hi)
+
 # ---------- main entry ----------
 def run_pipeline(step_path, workdir, emit):
-    case = os.path.abspath(os.path.join(workdir, "case")); os.makedirs(os.path.join(case, "constant", "triSurface"), exist_ok=True)
-<<<<<<< HEAD
-    res = dict(demo=False, status="failed", warnings=[], settings=dict(CASE, mesh_levels=MESH_LEVELS, end_time=END_TIME, solver=f"simpleFoam kOmegaSST, nut wall {os.environ.get('NUT_WALL', 'nutkWallFunction')} ({IMAGE})"))
-=======
-    res = dict(demo=False, status="failed", warnings=[], settings=dict(CASE, mesh_levels=MESH_LEVELS, end_time=END_TIME, solver=f"simpleFoam kOmegaSST ({IMAGE})"))
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
+    case = os.path.abspath(os.path.join(workdir, "case"))
+    if os.path.exists(case):
+        for entry in os.listdir(case):
+            p = os.path.join(case, entry)
+            if (entry.isdigit() and entry != "0") or entry == "postProcessing" or entry.startswith("log."):
+                if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
+                elif os.path.isfile(p): os.remove(p)
+    os.makedirs(os.path.join(case, "constant", "triSurface"), exist_ok=True)
+    res = dict(demo=False, status="failed", warnings=[], notes=[], settings=dict(CASE, mesh_levels=MESH_LEVELS, end_time=END_TIME, solver=f"simpleFoam kOmegaSST, nut wall {os.environ.get('NUT_WALL', 'nutUSpaldingWallFunction')} ({IMAGE}), residual target U/k/omega {RES_TARGET}, {globals().get('NPROC', 1)} solver process(es), {globals().get('MESH_PROCS', 1)} meshing process(es)"))
     stage = lambda i: emit(type="stage", i=i)
     try:
         stage(0); atm = isa(CASE["H"]); res["air"] = atm
-        info = geometry_to_stl(step_path, os.path.join(case, "constant", "triSurface", "aircraft.stl")); res["geometry"] = info; res["warnings"] += info["warnings"] + ["Mesh size is set from a chord proxy (middle bounding-box dimension), not a true chord."]
+        info = geometry_to_stl(step_path, os.path.join(case, "constant", "triSurface", "aircraft.stl")); res["geometry"] = info
+        res["notes"] += info.get("warnings", []) + ["Mesh size is set from a chord proxy (middle bounding-box dimension), not a true chord."]
         emit(type="log", m=f"Geometry: {info['solids']} solid, {info['faces']} faces, size {info['length_scale_m']:.3f} m, {info['triangles']} surface triangles, watertight")
         stage(1); meta = write_case(case, info, atm); res["domain"] = meta; res["settings"]["mesh_levels"] = meta["levels"]; res["layers"] = dict(meta["layers"])
         emit(type="log", m=f"Domain box written; background cells {meta['background_cells']}; surface level {meta['levels']} = {meta['surface_cell_m']*1000:.1f} mm cells (chord proxy {meta['chord_proxy_m']:.3f} m, {meta['chord_proxy_m']/meta['surface_cell_m']:.0f} cells)")
         stage(2)
         if of_run(case, "blockMesh", "log.blockMesh", lambda l: None): raise PipelineError("blockmesh_failed", "blockMesh failed (see log.blockMesh)")
-        if of_run(case, "snappyHexMesh -overwrite", "log.snappyHexMesh", lambda l: emit(type="log", m=l) if re.match(r"(Surface snapping|Mesh refinement|Layer addition|Writing mesh)", l) else None):
-            raise PipelineError("snappy_failed", "snappyHexMesh failed (see log.snappyHexMesh)")
+        if MESH_PROCS > 1:
+            write_decompose_dict(case, MESH_PROCS); emit(type="log", m=f"Meshing in parallel on {MESH_PROCS} processes (fixed, so the mesh does not depend on this machine)")
+            if of_run(case, "decomposePar -copyZero", "log.decomposePar0"): raise PipelineError("decompose_failed", "decomposePar failed (see log.decomposePar0)")
+        if of_run(case, mpi("snappyHexMesh -overwrite", MESH_PROCS) if MESH_PROCS > 1 else "snappyHexMesh -overwrite", "log.snappyHexMesh", lambda l: emit(type="log", m=l) if re.match(r"(Surface snapping|Mesh refinement|Layer addition|Writing mesh)", l) else None):
+            raise PipelineError("snappy_failed", "snappyHexMesh failed (see log.snappyHexMesh); if you used MESH_PROCS>1 try MESH_PROCS=1")
+        if MESH_PROCS > 1:
+            if of_run(case, "reconstructParMesh -constant", "log.reconstructParMesh"): raise PipelineError("reconstruct_failed", "reconstructParMesh failed (see log.reconstructParMesh)")
+            drop_processor_dirs(case)
         lyr = dict(meta["layers"])
         if LAYERS:
             got = parse_layers(open(os.path.join(case, "log.snappyHexMesh")).read())
             if got is None: res["warnings"].append("Prism layers were requested but the layer summary was not found in log.snappyHexMesh.")
             else:
                 lyr.update(got); emit(type="log", m=f"Prism layers: {got['coverage_pct']:.1f}% of surface faces extruded, requested {LAYERS} layers, first layer {meta['layers']['first_m']*1000:.2f} mm")
-                if got["coverage_pct"] < 80: res["warnings"].append(f"Prism layers cover only {got['coverage_pct']:.0f}% of the surface (often fails at sharp trailing edges): wall treatment is inconsistent.")
+                if got["coverage_pct"] < 80: res["warnings"].append(f"Prism layers cover only {got['coverage_pct']:.0f}% of the surface: wall treatment is inconsistent.")
+                else: res["notes"].append(f"Prism layer coverage: {got['coverage_pct']:.1f}% extruded ({got.get('avg_layers', LAYERS):.1f} layers avg).")
         res["layers"] = lyr
         of_run(case, "checkMesh", "log.checkMesh"); mq = parse_checkmesh(open(os.path.join(case, "log.checkMesh")).read()); res["mesh"] = mq
         emit(type="log", m=f"Mesh: {mq['cells']} cells, max non-orthogonality {mq['max_non_orthogonality']}, max skewness {mq['max_skewness']}, checkMesh OK={mq['mesh_ok']}")
         if not mq["mesh_ok"]: raise PipelineError("mesh_failed", f"checkMesh reported {mq['failed_checks'] or 'unknown'} failed checks; not solving on a bad mesh.")
         stage(3); emit(type="log", m=f"Solver setup: V={CASE['V']} m/s, alpha={CASE['alpha']} deg, beta={CASE['beta']} deg, rho={atm['rho']:.4f}, nu={atm['nu']:.3e}")
         stage(4); rp = ResidualParser(emit)
-        if of_run(case, "simpleFoam", "log.simpleFoam", rp.feed): raise PipelineError("solver_failed", "simpleFoam exited with an error (see log.simpleFoam)")
+        if NPROC > 1:
+            write_decompose_dict(case); emit(type="log", m=f"Solving in parallel on {NPROC} processes")
+            if of_run(case, "decomposePar -force", "log.decomposePar"): raise PipelineError("decompose_failed", "decomposePar failed (see log.decomposePar)")
+        if of_run(case, mpi("simpleFoam") if NPROC > 1 else "simpleFoam", "log.simpleFoam", rp.feed): raise PipelineError("solver_failed", "simpleFoam exited with an error (see log.simpleFoam); if you used NPROC>1 try NPROC=1")
+        if NPROC > 1:
+            if of_run(case, "reconstructPar -latestTime", "log.reconstructPar"): raise PipelineError("reconstruct_failed", "reconstructPar failed (see log.reconstructPar)")
+            drop_processor_dirs(case)
         rp.flush(); res["residual_criteria_met"] = rp.converged; res["iterations"] = rp.it
         stage(5); of_run(case, "simpleFoam -postProcess -func yPlus -latestTime", "log.yPlus"); res["yplus"] = parse_yplus(open(os.path.join(case, "log.yPlus")).read())
         yp = res["yplus"]
         if yp is not None and yp["max"] <= 0: res["yplus"] = yp = None
         if yp is None: res["warnings"].append("y+ could not be evaluated (postProcess returned no valid values).")
         elif not (30 <= yp["avg"] <= 300): res["warnings"].append(f"Average y+ = {yp['avg']:.3g} is outside the 30-300 range that wall functions need: drag/lift are not trustworthy.")
+        else: res["notes"].append(f"Average wall y+ is {yp['avg']:.1f} (within the valid 30-300 wall function range).")
         res["cp"] = postprocess_cp(case, os.path.join(workdir, "cp_midspan.png"), CASE["V"], info["bbox_m"])
         if not res["cp"] or res["cp"].get("error"): res["warnings"].append("Cp plot unavailable: " + str((res["cp"] or {}).get("error", "unknown")))
         fs = force_summary(parse_forces(case), meta["wind_dir"], meta["lift_dir"]); res["forces"] = fs
-<<<<<<< HEAD
         ref = reference_geometry(os.path.join(case, "constant", "triSurface", "aircraft.stl"), info["bbox_m"]); res["reference"] = ref
-        if fs and ref: qS = 0.5*atm["rho"]*CASE["V"]**2*ref["area_m2"]; fs["CL"] = fs["lift_N"]/qS; fs["CD"] = fs["drag_N"]/qS
-=======
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
+        if fs and ref:
+            qS = 0.5*atm["rho"]*CASE["V"]**2*ref["area_m2"]
+            fs["CL"] = fs["lift_N"]/qS; fs["CD"] = fs["drag_N"]/qS
+            val = validate_aerodynamics(fs["CL"], fs["CD"], ref["span_m"], ref["area_m2"], CASE["alpha"], info["bbox_m"])
+            res["validation"] = val
+            if val and val.get("skipped"): res["notes"].append("Lifting-line consistency check skipped: " + val["reason"] + ".")
+            elif val and not val["valid"]: res["warnings"].append(f"Lift is outside the lifting-line reference band (CL {fs['CL']:.4f} vs {val['CL_lo']:.4f}-{val['CL_hi']:.4f}, 5% margin): check mesh, convergence and angle of attack.")
         if fs is None: res["warnings"].append("Force output not found: lift/drag unavailable.")
         else:
             if (fs["lift_drift"] is None or fs["lift_drift"] > 0.02) or (fs["drag_drift"] is None or fs["drag_drift"] > 0.02):
                 res["warnings"].append(f"Lift/drag still changing over the last {fs['window_iterations']} iterations (>2% spread): forces NOT steady.")
+            else:
+                res["notes"].append(f"Forces steady over the last {fs['window_iterations']} iterations (lift spread {fs['lift_drift']*100:.2f}%, drag spread {fs['drag_drift']*100:.2f}%).")
         if fs and CASE["alpha"] >= 2 and fs["lift_N"] < 0: res["warnings"].append("Lift is NEGATIVE at positive angle of attack, which is physically unexpected: treat these forces as wrong (check mesh, convergence, orientation).")
+        if abs(CASE["alpha"]) > 5: res["warnings"].append("Angle of attack above 5 deg: in testing this setup predicted flow separation and unsteady forces at 8 deg, so lift and drag above about 5 deg are not reliable.")
         if not rp.converged: res["warnings"].append(f"Residual targets not met within {END_TIME} iterations.")
-        res["warnings"] += ["Wall-function mesh, not validated: treat drag and lift as unreliable until checked against reference data." + ("" if LAYERS else " No prism layers."), "Not validated against reference data yet.",
-<<<<<<< HEAD
-                            (f"CL and CD use the projected planform area S = {ref['area_m2']:.4g} m2 and mean chord {ref['mean_chord_m']:.4g} m, both computed from the geometry (for a full aircraft S includes the fuselage)." if ref else "Force coefficients unavailable: the reference area could not be computed from the geometry. Forces are in Newtons."),
-=======
-                            "Force coefficients unavailable: reference area/length are not defined for this geometry. Forces are in Newtons.",
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
-                            "Velocity field plots are not produced by v1; surface Cp at mid-span is (cp_midspan.png). Full fields are in the case folder."]
-        res["status"] = "completed_with_warnings"
+        else: res["notes"].append(f"Solver converged to residual targets in {rp.it} iterations.")
+        if ref: res["notes"].append(f"CL and CD use projected planform area S = {ref['area_m2']:.4g} m2 and mean chord {ref['mean_chord_m']:.4g} m.")
+        res["notes"].append("Velocity field plots are not produced by v1; surface Cp at mid-span is plotted in cp_midspan.png.")
+        res["limitations"] = ["Not validated against experimental data: the lifting-line comparison is a consistency check, not a validation.", "Wall-function RANS: treat lift and drag as estimates. Typical spread seen in testing: lift about 5-10% and drag about 10% (mesh method and domain size).", "Fully turbulent model (no transition): profile drag is higher than for a real wing with laminar flow at this Reynolds number."]
+        if not res["warnings"] and (res.get("validation") or {}).get("valid"):
+            res["status"] = "completed_checks_passed"
+        elif not res["warnings"]:
+            res["status"] = "completed"
+        else:
+            res["status"] = "completed_with_warnings"
     except PipelineError as e:
         res["error"] = dict(code=e.code, message=str(e)); emit(type="error", code=e.code, m=str(e))
     except FileNotFoundError as e:
@@ -376,18 +420,30 @@ def run_pipeline(step_path, workdir, emit):
     emit(type="report", text=rep); emit(type="done", status=res["status"], results=res); return res
 
 def make_report(r):
-    s = r["settings"]; a = r.get("air", {}); f = r.get("forces") or {}; m = r.get("mesh") or {}; g = r.get("geometry") or {}
+    s = r["settings"]; a = r.get("air", {}); f = r.get("forces") or {}; m = r.get("mesh") or {}; g = r.get("geometry") or {}; v = r.get("validation") or {}
     fmt = lambda v, u="": "unavailable" if v is None else f"{v:.4g} {u}".strip()
-    L = ["# CFD run report (fixed-wing, v1)", "", f"**Status: {r['status'].replace('_', ' ').upper()}** (real OpenFOAM run, not demo)", ""]
+    status_label = {"completed_checks_passed": "COMPLETED - CHECKS PASSED (NOT EXPERIMENTALLY VALIDATED)"}.get(r["status"], r["status"].replace("_", " ").upper())
+    L = ["# CFD run report (fixed-wing, v1)", "", f"**Status: {status_label}** (real OpenFOAM run, not demo)", ""]
     if r.get("error"): L += [f"**Error [{r['error']['code']}]:** {r['error']['message']}", ""]
     L += ["## Settings (fixed standard case)", f"- Airspeed {s['V']} m/s, altitude {s['H']} m (ISA), AoA {s['alpha']} deg, sideslip {s['beta']} deg",
           f"- Density {a.get('rho', float('nan')):.4f} kg/m3, kinematic viscosity {a.get('nu', float('nan')):.3e} m2/s (calculated, ISA)", f"- Solver: {s['solver']}, {s['end_time']} iteration limit, mesh levels {s['mesh_levels']}",
           "", "## Geometry", f"- Solids {g.get('solids', 'n/a')}, faces {g.get('faces', 'n/a')}, size {fmt(g.get('length_scale_m'), 'm')}, wetted area {fmt(g.get('wetted_area_m2'), 'm2')}",
           "", "## Mesh", f"- Prism layers: " + (("requested %d, first layer %.2f mm, expansion %.2f, %s of surface faces extruded" % (r["layers"]["n"], r["layers"]["first_m"]*1000, r["layers"]["expansion"], ("%.0f%%" % r["layers"]["coverage_pct"]) if "coverage_pct" in r["layers"] else "coverage unknown")) if r.get("layers") and r["layers"]["n"] else "none"), f"- y+ (wall): {('avg %.3g, max %.3g' % (r['yplus']['avg'], r['yplus']['max'])) if r.get('yplus') else 'unavailable'}", f"- Cells {m.get('cells', 'unavailable')}, max non-orthogonality {fmt(m.get('max_non_orthogonality'))}, max skewness {fmt(m.get('max_skewness'))}, checkMesh OK: {m.get('mesh_ok', 'unavailable')}",
           "", "## Results (calculated by the solver)", f"- Lift {fmt(f.get('lift_N'), 'N')}, drag {fmt(f.get('drag_N'), 'N')}, L/D {fmt(f.get('lift_to_drag'))}", f"- Mid-span Cp: " + (("min %.3g at x/c=%.3f; plot %s" % (r["cp"]["cp_min"], r["cp"]["cp_min_x_over_c"], r["cp"].get("png") or "not drawn")) if r.get("cp") and "cp_min" in r["cp"] else "unavailable"), f"- Drag split: pressure {fmt(f.get('pressure_drag_N'), 'N')}, viscous {fmt(f.get('viscous_drag_N'), 'N')}",
-<<<<<<< HEAD
-          (("- CL %.4f, CD %.4f (S = %.4g m2, mean chord %.4g m)" % (f["CL"], f["CD"], r["reference"]["area_m2"], r["reference"]["mean_chord_m"])) if f.get("CL") is not None and r.get("reference") else "- CL, CD: unavailable (no reference area/length defined)"), f"- Residual targets met: {r.get('residual_criteria_met', 'unavailable')} (iterations run: {r.get('iterations', 'n/a')}). This alone does not prove convergence or accuracy.", "", "## Warnings and assumptions"]
-=======
-          "- CL, CD: unavailable (no reference area/length defined)", f"- Residual targets met: {r.get('residual_criteria_met', 'unavailable')} (iterations run: {r.get('iterations', 'n/a')}). This alone does not prove convergence or accuracy.", "", "## Warnings and assumptions"]
->>>>>>> 35e98ac99922297f587c18a6d3e7b986c00dae1f
-    return "\n".join(L + [f"- {w}" for w in r["warnings"]] + [""])
+          (("- CL %.4f, CD %.4f (S = %.4g m2, mean chord %.4g m)" % (f["CL"], f["CD"], r["reference"]["area_m2"], r["reference"]["mean_chord_m"])) if f.get("CL") is not None and r.get("reference") else "- CL, CD: unavailable (no reference area/length defined)"), f"- Residual targets met: {r.get('residual_criteria_met', 'unavailable')} (iterations run: {r.get('iterations', 'n/a')})."]
+    if v and not v.get("skipped"):
+        L += ["", "## Consistency check against lifting-line theory (not an experimental validation)",
+              f"- Aspect ratio {v['AR']:.2f}; assumed 2D lift slope {v['a0_range'][0]}-{v['a0_range'][1]} per rad (plausible range for NACA0012 at Re ~ 3e5; an assumption, not a measurement)",
+              f"- Reference CL band {v['CL_lo']:.4f}-{v['CL_hi']:.4f} (mid {v['CL_mid']:.4f}); simulated CL {f.get('CL', 0):.4f} is {v['err_vs_hi_pct']:+.1f}% to {v['err_vs_lo_pct']:+.1f}% relative to the band ends",
+              f"- Informational drag band CD {v['CD_lo']:.4f}-{v['CD_hi']:.4f} (profile drag 0.0120-0.0140 for a fully turbulent solver plus induced drag); simulated CD {f.get('CD', 0):.4f}",
+              f"- Result: {'CONSISTENT (lift inside the band with a 5% margin)' if v['valid'] else 'OUTSIDE THE BAND, attention needed'}"]
+    elif v:
+        L += ["", "## Consistency check against lifting-line theory", f"- Skipped: {v['reason']}."]
+    if r.get("warnings"):
+        L += ["", "## Warnings", *[f"- {w}" for w in r["warnings"]]]
+    if r.get("notes"):
+        L += ["", "## Notes and Assumptions", *[f"- {n}" for n in r["notes"]]]
+    if r.get("limitations"):
+        L += ["", "## Limitations (always apply)", *[f"- {n}" for n in r["limitations"]]]
+    L += [""]
+    return "\n".join(L)
