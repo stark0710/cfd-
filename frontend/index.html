@@ -562,8 +562,11 @@ async function finishLive(runId,status,resObj){
   // Render y+ summary
   renderYPlusSummary(r&&r.yplus?r.yplus.avg:37.2, l&&l.coverage_pct?l.coverage_pct:99.2);
 
-  // Load updated STL in 3D viewer
-  loadAircraftModel(`/runs/${runId}/stl`);
+  // Load updated STL in 3D viewer & transition to completed state
+  loadAircraftModel(`/runs/${runId}/stl`, ()=>{
+    handleStage3DTransition(6);
+  });
+  handleStage3DTransition(6);
 
   // Load Markdown report
   try{
@@ -706,7 +709,7 @@ let scene, camera, renderer, controls;
 let planeMesh=null, solidMat, wireMat, cpMat;
 let flowStyle="lines"; // "lines" or "dots"
 let streamlineLinesGroup=null, streamlineParticleSystem=null;
-let streamlineDashedMats=[], streamlineCurves=[], streamlineParticles=[];
+let streamlineLineGeoms=[], streamlineDashedMats=[], streamlineCurves=[], streamlineParticles=[];
 let meshingScanGroup=null, meshingScanPlane=null, meshingScanBox=null;
 let meshingScannerActive=false, meshingScanProgress=0;
 let streamlinesVisible=false, flowSpeedMult=1.0;
@@ -804,7 +807,7 @@ function buildProceduralPlaneGeometry(){
   return fuselage;
 }
 
-function loadAircraftModel(url){
+function loadAircraftModel(url, onLoaded){
   $("viewer3d_overlay").textContent="Loading 3D aircraft CAD geometry...";
   if(planeMesh){ scene.remove(planeMesh); planeMesh=null; }
 
@@ -821,11 +824,17 @@ function loadAircraftModel(url){
     // Create Cp color attribute based on aerodynamic pressure gradient
     createCpColors(geometry);
 
-    planeMesh=new THREE.Mesh(geometry, solidMat);
+    const chosenMat=(renderMode==="cp"&&cpMat)?cpMat:(renderMode==="wire"?wireMat:solidMat);
+    planeMesh=new THREE.Mesh(geometry, chosenMat);
     planeMesh.rotation.x=-Math.PI/2; // Orient nose toward -X / aerodynamic attitude
     scene.add(planeMesh);
     
-    $("viewer3d_overlay").textContent=`Aircraft CAD Loaded: ${geometry.attributes.position.count.toLocaleString()} surface vertices`;
+    if(renderMode==="cp"){
+      $("viewer3d_overlay").textContent="Simulation Solved: 3D Surface Pressure (Cp) & Aerodynamic Forces Computed";
+    }else{
+      $("viewer3d_overlay").textContent=`Aircraft CAD Loaded: ${geometry.attributes.position.count.toLocaleString()} surface vertices`;
+    }
+    if(onLoaded) onLoaded();
   }, undefined, err=>{
     console.warn("Could not load STL from server, falling back to procedural preview:", err);
     // Procedural fallback
@@ -835,6 +844,7 @@ function loadAircraftModel(url){
     planeMesh=new THREE.Mesh(fallbackGeom, solidMat);
     scene.add(planeMesh);
     $("viewer3d_overlay").textContent="Displaying 3D Aircraft Model Preview";
+    if(onLoaded) onLoaded();
   });
 }
 
@@ -913,6 +923,7 @@ function setMeshingScanner(active){
 function createFlowVisualization(){
   if(streamlineLinesGroup){ scene.remove(streamlineLinesGroup); streamlineLinesGroup=null; }
   if(streamlineParticleSystem){ scene.remove(streamlineParticleSystem); streamlineParticleSystem=null; }
+  streamlineLineGeoms=[];
   streamlineDashedMats=[];
   streamlineCurves=[];
   streamlineParticles=[];
@@ -1066,6 +1077,7 @@ function createFlowVisualization(){
     const geo=new THREE.BufferGeometry().setFromPoints(pts);
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geo.computeLineDistances();
+    streamlineLineGeoms.push(geo);
 
     // Base continuous contour line
     const baseMat=new THREE.LineBasicMaterial({
@@ -1178,18 +1190,27 @@ function animate3D(){
 
   // 2. Animate Streamlines (Simulation Video Effect)
   if(streamlinesVisible){
-    if(flowStyle==="lines"){
-      const step=flowSpeedMult*0.014;
-      for(let i=0; i<streamlineDashedMats.length; i++){
-        streamlineDashedMats[i].dashOffset -= step;
+    // Advance animated flow dashes along continuous contour lines in WebGL
+    const lineStep=flowSpeedMult*0.022;
+    for(let i=0; i<streamlineLineGeoms.length; i++){
+      const ld=streamlineLineGeoms[i].attributes.lineDistance;
+      if(ld){
+        const cnt=ld.count;
+        for(let j=0; j<cnt; j++){
+          ld.setX(j, ld.getX(j)+lineStep);
+        }
+        ld.needsUpdate=true;
       }
-    } else if(flowStyle==="dots" && streamlineParticleSystem){
+    }
+
+    // Advance fluid particles along surface flow pathways
+    if(streamlineParticleSystem){
       const posAttr=streamlineParticleSystem.geometry.attributes.position;
       const colAttr=streamlineParticleSystem.geometry.attributes.color;
       const count=streamlineParticles.length;
       for(let i=0; i<count; i++){
         const p=streamlineParticles[i];
-        p.t=(p.t + p.speed*flowSpeedMult*0.006)%1.0;
+        p.t=(p.t + p.speed*flowSpeedMult*0.008)%1.0;
         const pt=sampleStreamlinePoint(p.curveIdx, p.t);
         const col=sampleStreamlineColor(p.curveIdx, p.t);
         posAttr.setXYZ(i, pt.x, pt.y, pt.z);
@@ -1229,8 +1250,8 @@ function setRenderMode(mode){
 
 function setStreamlines(active){
   streamlinesVisible=active;
-  if(streamlineLinesGroup) streamlineLinesGroup.visible=(active && flowStyle==="lines");
-  if(streamlineParticleSystem) streamlineParticleSystem.visible=(active && flowStyle==="dots");
+  if(streamlineLinesGroup) streamlineLinesGroup.visible=(active && (flowStyle==="lines"||flowStyle==="both"));
+  if(streamlineParticleSystem) streamlineParticleSystem.visible=active;
   const btn=$("btn_flow_toggle");
   if(btn){
     btn.textContent=active?"Streamlines: ON":"Streamlines: OFF";
@@ -1281,7 +1302,7 @@ $("btn_flow_style").onclick=()=>{
   $("btn_flow_style").style.background=(flowStyle==="lines")?"#0284c7":"#8b5cf6";
   if(streamlinesVisible){
     if(streamlineLinesGroup) streamlineLinesGroup.visible=(flowStyle==="lines");
-    if(streamlineParticleSystem) streamlineParticleSystem.visible=(flowStyle==="dots");
+    if(streamlineParticleSystem) streamlineParticleSystem.visible=true;
   }
 };
 
