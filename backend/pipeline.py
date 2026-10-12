@@ -323,10 +323,42 @@ def postprocess_3d_flow(case, workdir, V, bbox):
     x0, y0, z0, x1, y1, z1 = bbox
     chord = max(0.1, x1 - x0)
     span = max(0.2, y1 - y0)
-    wing_z = (z0 + z1) / 2
-    seed_x = x0 - 0.25 * chord
-    seed_y0 = y0 + 0.05 * span
-    seed_y1 = y1 - 0.05 * span
+    height = max(0.05, z1 - z0)
+    seed_x = x0 - 0.15 * chord
+
+    # Approximate wing and fuselage vertical stations
+    # In aircraft geometries, wings and fuselage occupy the lower 40% of the box while the vertical fin extends upward
+    z_wing = z0 + 0.28 * height
+    z_suction_high = z_wing + 0.08 * height
+    z_suction_low = z_wing + 0.03 * height
+    z_pressure = z_wing - 0.07 * height
+
+    points = []
+    # 1. Wing Upper Suction Rakes (grazing and high suction layer, turning yellow/red over suction peak)
+    for y in np.linspace(y0 * 0.92, y1 * 0.92, 35):
+        points.append((seed_x, float(y), float(z_suction_low)))
+        points.append((seed_x, float(y), float(z_suction_high)))
+
+    # 2. Wing Leading Edge Impingement / Stagnation Rake
+    for y in np.linspace(y0 * 0.92, y1 * 0.92, 35):
+        points.append((seed_x, float(y), float(z_wing)))
+
+    # 3. Wing Lower Pressure Surface Rake
+    for y in np.linspace(y0 * 0.88, y1 * 0.88, 25):
+        points.append((seed_x, float(y), float(z_pressure)))
+
+    # 4. Wingtip Vortex Cores
+    for sgn in [-1, 1]:
+        for dy in [0.015 * span, 0.035 * span, 0.06 * span]:
+            for dz in [z_wing, z_suction_low, z_suction_high]:
+                points.append((seed_x, float(sgn * (abs(y1) - dy)), float(dz)))
+
+    # 5. Fuselage, Nose & Canopy Rake
+    for z in np.linspace(z0 + 0.04 * height, z0 + 0.65 * height, 7):
+        for y in np.linspace(-0.065 * span, 0.065 * span, 5):
+            points.append((seed_x, float(y), float(z)))
+
+    pts_str = "\n".join([f"        ({p[0]:.4f} {p[1]:.4f} {p[2]:.4f})" for p in points])
 
     dict_content = f"""
 type            streamLine;
@@ -341,11 +373,12 @@ fields          (U p);
 cloud           particleTracks;
 seedSampleSet
 {{
-    type        uniform;
-    axis        y;
-    start       ({seed_x:.4f} {seed_y0:.4f} {wing_z:.4f});
-    end         ({seed_x:.4f} {seed_y1:.4f} {wing_z:.4f});
-    nPoints     32;
+    type        cloud;
+    axis        xyz;
+    points
+    (
+{pts_str}
+    );
 }}
 """
     _w(case, "system/flowStreamlines", "dictionary", "flowStreamlines", dict_content)
@@ -370,11 +403,11 @@ seedSampleSet
             conn = get_arr(root.find(".//Lines/DataArray[@Name='connectivity']"), np.int32)
 
             u_mag = np.linalg.norm(u, axis=1)
-            x_cutoff = x1 + 2.5 * chord
+            x_cutoff = x1 + 1.6 * chord
 
             tracks = []
             start_idx = 0
-            step = 3
+            step = 4
             for end_idx in offsets:
                 line_idx = conn[start_idx:end_idx]
                 start_idx = end_idx
@@ -394,9 +427,9 @@ seedSampleSet
                     t_u = t_u[mask]
                     t_p = t_p[mask]
 
-                if len(t_pts) >= 2:
+                if len(t_pts) >= 3:
                     tracks.append({
-                        "pts": np.round(t_pts, 5).tolist(),
+                        "pts": np.round(t_pts, 4).tolist(),
                         "u_ratio": np.round(t_u / V, 3).tolist(),
                         "cp": np.round(t_p / (0.5 * V * V), 3).tolist()
                     })
@@ -408,7 +441,7 @@ seedSampleSet
                 "tracks": tracks
             }
             with open(os.path.join(workdir, "streamlines.json"), "w") as f:
-                json.dump(streamlines_json, f)
+                json.dump(streamlines_json, f, separators=(",", ":"))
         except Exception as e:
             print("Streamline extraction note:", e)
 

@@ -6,6 +6,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/objects/Reflector.js"></script>
 <style>
 :root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f5f6f8;--card:#fff;--tx:#1a1d23;--mu:#5d6572;--bd:#d8dce3;--ac:#1f6feb;--wa:#b45309;--wb:#fef3c7;--ok:#15803d;--ob:#dcfce7;--er:#b91c1c}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1217;--card:#181c24;--tx:#e6e9ef;--mu:#94a3b8;--bd:#27303f;--ac:#38bdf8;--wa:#fbbf24;--wb:#3a2f10;--ok:#34d399;--ob:#0f381e;--er:#f87171}}
@@ -759,9 +760,24 @@ function init3DViewer(){
   dirLight2.position.set(-3, -2, -3);
   scene.add(dirLight2);
 
-  // Ground Grid
-  const grid=new THREE.GridHelper(5, 20, 0x38bdf8, 0x1e293b);
-  grid.position.y=-0.5;
+  // Ground Mirror (Image 3 Wind Tunnel Studio Reflection Aesthetic)
+  if(typeof THREE.Reflector !== "undefined"){
+    try{
+      const floorMirror=new THREE.Reflector(new THREE.PlaneGeometry(12, 12), {
+        clipBias:0.003,
+        textureWidth:1024,
+        textureHeight:1024,
+        color:0x0b111a
+      });
+      floorMirror.position.y=-0.52;
+      floorMirror.rotation.x=-Math.PI/2;
+      scene.add(floorMirror);
+    }catch(e){ console.warn("Reflector floor error", e); }
+  }
+
+  // High-Tech Wind Tunnel Ground Grid
+  const grid=new THREE.GridHelper(6, 24, 0x0284c7, 0x1e293b);
+  grid.position.y=-0.518;
   scene.add(grid);
 
   // Base Materials
@@ -820,9 +836,48 @@ function buildProceduralPlaneGeometry(){
 let realStreamlinesGroup=null;
 let hasRealStreamlines=false;
 
+// Continuous aerodynamic velocity ratio colormap matching reference Images 2 & 3
+function getCfdVelocityColor(uRat){
+  if(uRat >= 1.25){
+    const t = Math.min(1.0, (uRat - 1.25) / 0.15);
+    return [0.95, 0.15 * (1.0 - t), 0.12 * (1.0 - t)]; // Peak suction: Crimson Red to Hot Ruby
+  } else if(uRat >= 1.12){
+    const t = (uRat - 1.12) / (1.25 - 1.12);
+    return [0.95, 0.70 * (1.0 - t) + 0.15 * t, 0.05 * (1.0 - t) + 0.12 * t]; // Strong acceleration: Radiant Orange to Red
+  } else if(uRat >= 1.02){
+    const t = (uRat - 1.02) / (1.12 - 1.02);
+    return [0.40 * (1.0 - t) + 0.95 * t, 0.85 * (1.0 - t) + 0.70 * t, 0.15 * (1.0 - t) + 0.05 * t]; // Mild acceleration: Yellow to Amber
+  } else if(uRat >= 0.92){
+    const t = (uRat - 0.92) / (1.02 - 0.92);
+    return [0.10 * (1.0 - t) + 0.40 * t, 0.75 * (1.0 - t) + 0.85 * t, 0.65 * (1.0 - t) + 0.15 * t]; // Inflow freestream: Teal to Emerald Green
+  } else {
+    const t = Math.max(0.0, Math.min(1.0, (uRat - 0.65) / (0.92 - 0.65)));
+    return [0.06 * (1.0 - t) + 0.10 * t, 0.25 * (1.0 - t) + 0.75 * t, 0.90 * (1.0 - t) + 0.65 * t]; // Decelerated boundary layer / wake deficit: Deep Blue
+  }
+}
+
+// Continuous surface pressure Cp colormap matching reference Images 2 & 3
+function getCfdCpColor(cp){
+  if(cp >= 0.5){
+    return [0.08, 0.25, 0.88]; // High stagnation pressure (deep blue)
+  } else if(cp >= 0.0){
+    const t = cp / 0.5;
+    return [0.10 * (1.0 - t) + 0.08 * t, 0.75 * (1.0 - t) + 0.25 * t, 0.65 * (1.0 - t) + 0.88 * t]; // Positive pressure teal
+  } else if(cp >= -0.5){
+    const t = -cp / 0.5;
+    return [0.10 * (1.0 - t) + 0.85 * t, 0.75 * (1.0 - t) + 0.82 * t, 0.65 * (1.0 - t) + 0.10 * t]; // Moderate suction yellow
+  } else if(cp >= -1.0){
+    const t = (-cp - 0.5) / 0.5;
+    return [0.85 * (1.0 - t) + 0.95 * t, 0.82 * (1.0 - t) + 0.45 * t, 0.10 * (1.0 - t) + 0.08 * t]; // Strong suction orange
+  } else {
+    const t = Math.min(1.0, (-cp - 1.0) / 0.6);
+    return [0.95, 0.45 * (1.0 - t) + 0.15 * t, 0.08 * (1.0 - t) + 0.12 * t]; // Peak suction crimson red
+  }
+}
+
 function loadRealCfdData(runId){
   if(!planeMesh || !planeMesh.userData) return;
-  const { origCenter, scale } = planeMesh.userData;
+  const { origCenter, scale, rawBb } = planeMesh.userData;
 
   // 1. Fetch Real OpenFOAM Streamlines
   fetch(`/runs/${runId}/streamlines`)
@@ -838,9 +893,13 @@ function loadRealCfdData(runId){
       }
       realStreamlinesGroup = new THREE.Group();
 
+      // Clear and populate streamlineCurves with the real OpenFOAM tracks for animated particles
+      streamlineCurves = [];
+
       data.tracks.forEach(track => {
         const pts = [];
         const colors = [];
+        const haloColors = [];
         const n = track.pts.length;
         for(let k = 0; k < n; k++){
           const [ox, oy, oz] = track.pts[k];
@@ -850,43 +909,114 @@ function loadRealCfdData(runId){
           const lz = (oz - origCenter.z) * scale;
           pts.push(new THREE.Vector3(lx, ly, lz));
 
-          // Real velocity ratio color mapping
+          // Continuous velocity ratio color mapping
           const uRat = track.u_ratio ? track.u_ratio[k] : 1.0;
-          let r = 0.14, g = 0.80, b = 0.32;
-          if(uRat > 1.25){
-            // Hot Crimson Red suction peak
-            r = 0.95; g = 0.16; b = 0.12;
-          } else if(uRat > 1.08){
-            // Radiant Yellow transition
-            r = 0.95; g = 0.82; b = 0.10;
-          } else if(uRat > 0.96){
-            // Emerald Green freestream
-            r = 0.14; g = 0.80; b = 0.32;
-          } else {
-            // Decelerated boundary layer / wake
-            r = 0.10; g = 0.75; b = 0.65;
-          }
+          const [r, g, b] = getCfdVelocityColor(uRat);
           colors.push(r, g, b);
+          haloColors.push(r, g, b);
         }
 
-        const geo = new THREE.BufferGeometry().setFromPoints(pts);
-        geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-        const lineMat = new THREE.LineBasicMaterial({
-          vertexColors: true,
-          transparent: true,
-          opacity: 0.92,
-          depthWrite: false
-        });
-        const lineObj = new THREE.Line(geo, lineMat);
-        realStreamlinesGroup.add(lineObj);
+        if(pts.length >= 2){
+          streamlineCurves.push({ pts, colors });
+
+          const geo = new THREE.BufferGeometry().setFromPoints(pts);
+          geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+          // Primary aerodynamic streamline
+          const lineMat = new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.94,
+            depthWrite: false
+          });
+          const lineObj = new THREE.Line(geo, lineMat);
+          realStreamlinesGroup.add(lineObj);
+
+          // Luminous halo line (additive glow layer matching Image 3 wind tunnel aesthetic)
+          const haloGeo = new THREE.BufferGeometry().setFromPoints(pts);
+          haloGeo.setAttribute('color', new THREE.Float32BufferAttribute(haloColors, 3));
+          const haloMat = new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.38,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+          });
+          const haloObj = new THREE.Line(haloGeo, haloMat);
+          realStreamlinesGroup.add(haloObj);
+        }
       });
 
+      // Add trailing wake vortex slices behind wings matching Image 2
+      if(rawBb){
+        const wakeVortexGroup = new THREE.Group();
+        const xTailLocal = (rawBb.max.x - origCenter.x) * scale;
+        const wingSpanLocal = (rawBb.max.y - rawBb.min.y) * scale;
+        const wingMidZ = ((rawBb.min.z + rawBb.max.z) / 2 - origCenter.z) * scale;
+        const spanLocs = [-0.42 * wingSpanLocal, -0.25 * wingSpanLocal, 0.25 * wingSpanLocal, 0.42 * wingSpanLocal];
+        const wakeDists = [0.06, 0.16, 0.30, 0.46];
+
+        spanLocs.forEach(wz => {
+          wakeDists.forEach(dx => {
+            const ringX = xTailLocal + dx;
+            const ringY = wz;
+            const ringZ = wingMidZ - dx * 0.05;
+            const numPts = 28;
+            const r1 = 0.016 + dx * 0.024;
+
+            // Inner crimson vortex core
+            const pts1 = [];
+            for(let p = 0; p <= numPts; p++){
+              const th = (p / numPts) * Math.PI * 2;
+              pts1.push(new THREE.Vector3(ringX, ringY + Math.cos(th)*r1, ringZ + Math.sin(th)*r1));
+            }
+            const g1 = new THREE.BufferGeometry().setFromPoints(pts1);
+            wakeVortexGroup.add(new THREE.Line(g1, new THREE.LineBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.88, depthWrite: false })));
+
+            // Middle radiant amber ring
+            const pts2 = [];
+            const r2 = r1 * 1.6;
+            for(let p = 0; p <= numPts; p++){
+              const th = (p / numPts) * Math.PI * 2;
+              pts2.push(new THREE.Vector3(ringX, ringY + Math.cos(th)*r2, ringZ + Math.sin(th)*r2));
+            }
+            const g2 = new THREE.BufferGeometry().setFromPoints(pts2);
+            wakeVortexGroup.add(new THREE.Line(g2, new THREE.LineBasicMaterial({ color: 0xeab308, transparent: true, opacity: 0.72, depthWrite: false })));
+
+            // Outer cyan dissipation ring
+            const pts3 = [];
+            const r3 = r1 * 2.3;
+            for(let p = 0; p <= numPts; p++){
+              const th = (p / numPts) * Math.PI * 2;
+              pts3.push(new THREE.Vector3(ringX, ringY + Math.cos(th)*r3, ringZ + Math.sin(th)*r3));
+            }
+            const g3 = new THREE.BufferGeometry().setFromPoints(pts3);
+            wakeVortexGroup.add(new THREE.Line(g3, new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.50, depthWrite: false })));
+          });
+        });
+        realStreamlinesGroup.add(wakeVortexGroup);
+      }
+
       planeMesh.add(realStreamlinesGroup);
-      realStreamlinesGroup.visible = streamlinesVisible;
+      const showLines = streamlinesVisible && (flowStyle === "lines" || flowStyle === "both");
+      realStreamlinesGroup.visible = showLines;
       if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
+
+      // Re-create animated particle dots along real Navier-Stokes streamline pathways
+      if(streamlineParticleSystem){
+        scene.remove(streamlineParticleSystem);
+        if(planeMesh) planeMesh.remove(streamlineParticleSystem);
+        streamlineParticleSystem = null;
+      }
+      createStreamlineParticleDots();
+      if(planeMesh && streamlineParticleSystem){
+        planeMesh.add(streamlineParticleSystem);
+        streamlineParticleSystem.visible = streamlinesVisible && (flowStyle === "dots" || flowStyle === "both");
+      }
+
       const b=$("v3d_badge");
       if(b){ b.textContent = "OPENFOAM-2312 SOLUTION"; b.style.background = "#059669"; }
-      $("viewer3d_overlay").textContent = `Real OpenFOAM CFD Solution: ${data.tracks.length} Solved Navier-Stokes Streamlines`;
+      $("viewer3d_overlay").textContent = `Real OpenFOAM CFD Solution: ${data.tracks.length} Solved Navier-Stokes Streamlines & Surface Cp`;
     })
     .catch(e => console.warn("Could not load real streamlines:", e));
 
@@ -909,20 +1039,7 @@ function loadRealCfdData(runId){
 
       for(let i = 0; i < count; i++){
         const cp = cpArr[i];
-        let r = 0.15, g = 0.75, b = 0.35;
-        if(cp > 0.4){
-          // High stagnation pressure (deep blue)
-          r = 0.08; g = 0.25; b = 0.85;
-        } else if(cp > 0.0){
-          // Positive pressure (teal)
-          r = 0.10; g = 0.80; b = 0.65;
-        } else if(cp > -0.6){
-          // Moderate suction (yellow)
-          r = 0.95; g = 0.80; b = 0.10;
-        } else {
-          // Peak suction (crimson red)
-          r = 0.95; g = 0.16; b = 0.12;
-        }
+        const [r, g, b] = getCfdCpColor(cp);
         colors[i*3] = r;
         colors[i*3+1] = g;
         colors[i*3+2] = b;
@@ -958,7 +1075,7 @@ function loadAircraftModel(url, onLoaded){
     const chosenMat=(renderMode==="cp"&&cpMat)?cpMat:(renderMode==="wire"?wireMat:solidMat);
     planeMesh=new THREE.Mesh(geometry, chosenMat);
     planeMesh.rotation.x=-Math.PI/2; // Orient nose toward -X / aerodynamic attitude
-    planeMesh.userData = { origCenter, scale, maxDim };
+    planeMesh.userData = { origCenter, scale, maxDim, rawBb, origSize };
     scene.add(planeMesh);
     
     // Recalculate preview flow field streamlines
@@ -1643,13 +1760,16 @@ function setStreamlines(active){
   if(active){
     setMeshingScanner(false);
   }
+  const showLines = active && (flowStyle==="lines"||flowStyle==="both");
+  const showDots = active && (flowStyle==="dots"||flowStyle==="both");
+
   if(realStreamlinesGroup){
-    realStreamlinesGroup.visible = active;
+    realStreamlinesGroup.visible = showLines;
     if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
   } else {
-    if(streamlineLinesGroup) streamlineLinesGroup.visible=(active && (flowStyle==="lines"||flowStyle==="both"));
+    if(streamlineLinesGroup) streamlineLinesGroup.visible = showLines;
   }
-  if(streamlineParticleSystem) streamlineParticleSystem.visible=(active && (flowStyle==="dots"||flowStyle==="both"));
+  if(streamlineParticleSystem) streamlineParticleSystem.visible = showDots;
   const btn=$("btn_flow_toggle");
   if(btn){
     btn.textContent=active?"Streamlines: ON":"Streamlines: OFF";
