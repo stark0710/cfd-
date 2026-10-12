@@ -226,6 +226,12 @@ class H(BaseHTTPRequestHandler):
         if len(p) == 3 and p[0] == "runs" and p[2] == "stl":
             f = os.path.join(WORK, os.path.basename(p[1]), "case", "constant", "triSurface", "aircraft.stl")
             return self._j(200, open(f, "rb").read(), "model/stl") if os.path.exists(f) else self._j(404, {"error": "no stl yet"})
+        if len(p) == 3 and p[0] == "runs" and p[2] == "streamlines":
+            f = os.path.join(WORK, os.path.basename(p[1]), "streamlines.json")
+            return self._j(200, open(f).read(), "application/json") if os.path.exists(f) else self._j(404, {"error": "no streamlines yet"})
+        if len(p) == 3 and p[0] == "runs" and p[2] == "surface_cp.bin":
+            f = os.path.join(WORK, os.path.basename(p[1]), "surface_cp.bin")
+            return self._j(200, open(f, "rb").read(), "application/octet-stream") if os.path.exists(f) else self._j(404, {"error": "no surface cp yet"})
         if len(p) == 3 and p[0] == "runs" and p[2] == "polar.png":
             f = os.path.join(WORK, os.path.basename(p[1]), "polar.png")
             if not os.path.exists(f):

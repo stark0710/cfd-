@@ -316,6 +316,114 @@ def postprocess_cp(case, out_png, V, bbox):
         return res
     except Exception as e: return dict(error=f"{type(e).__name__}: {e}")
 
+def postprocess_3d_flow(case, workdir, V, bbox):
+    """Extract true OpenFOAM 3D streamlines and surface Cp from solver results.
+    Writes streamlines.json and surface_cp.bin to workdir for web 3D viewer."""
+    import base64, xml.etree.ElementTree as ET, numpy as np
+    x0, y0, z0, x1, y1, z1 = bbox
+    chord = max(0.1, x1 - x0)
+    span = max(0.2, y1 - y0)
+    wing_z = (z0 + z1) / 2
+    seed_x = x0 - 0.25 * chord
+    seed_y0 = y0 + 0.05 * span
+    seed_y1 = y1 - 0.05 * span
+
+    dict_content = f"""
+type            streamLine;
+libs            ("libfieldFunctionObjects.so");
+executeControl  writeTime;
+writeControl    writeTime;
+setFormat       vtk;
+direction       forward;
+lifeTime        10000;
+nSubCycle       5;
+fields          (U p);
+cloud           particleTracks;
+seedSampleSet
+{{
+    type        uniform;
+    axis        y;
+    start       ({seed_x:.4f} {seed_y0:.4f} {wing_z:.4f});
+    end         ({seed_x:.4f} {seed_y1:.4f} {wing_z:.4f});
+    nPoints     32;
+}}
+"""
+    _w(case, "system/flowStreamlines", "dictionary", "flowStreamlines", dict_content)
+    of_run(case, "simpleFoam -postProcess -func flowStreamlines -latestTime", "log.flowStreamlines")
+
+    # 1. Parse streamlines
+    vtp_files = sorted(glob.glob(os.path.join(case, "postProcessing", "sets", "flowStreamlines", "*", "track*.vtp")))
+    if vtp_files:
+        try:
+            tree = ET.parse(vtp_files[-1])
+            root = tree.getroot()
+
+            def get_arr(elem, dtype=np.float32):
+                raw = base64.b64decode(elem.text.strip())
+                header = np.frombuffer(raw[:8], dtype=np.uint64)[0]
+                return np.frombuffer(raw[8:8+header], dtype=dtype)
+
+            pts = get_arr(root.find(".//Points/DataArray"), np.float32).reshape(-1, 3)
+            p = get_arr(root.find(".//PointData/DataArray[@Name='p']"), np.float32)
+            u = get_arr(root.find(".//PointData/DataArray[@Name='U']"), np.float32).reshape(-1, 3)
+            offsets = get_arr(root.find(".//Lines/DataArray[@Name='offsets']"), np.int32)
+            conn = get_arr(root.find(".//Lines/DataArray[@Name='connectivity']"), np.int32)
+
+            u_mag = np.linalg.norm(u, axis=1)
+            x_cutoff = x1 + 2.5 * chord
+
+            tracks = []
+            start_idx = 0
+            step = 3
+            for end_idx in offsets:
+                line_idx = conn[start_idx:end_idx]
+                start_idx = end_idx
+                if len(line_idx) < 2: continue
+
+                sub_idx = line_idx[::step]
+                if sub_idx[-1] != line_idx[-1]:
+                    sub_idx = np.append(sub_idx, line_idx[-1])
+
+                t_pts = pts[sub_idx]
+                t_u = u_mag[sub_idx]
+                t_p = p[sub_idx]
+
+                mask = t_pts[:, 0] <= x_cutoff
+                if np.any(mask):
+                    t_pts = t_pts[mask]
+                    t_u = t_u[mask]
+                    t_p = t_p[mask]
+
+                if len(t_pts) >= 2:
+                    tracks.append({
+                        "pts": np.round(t_pts, 5).tolist(),
+                        "u_ratio": np.round(t_u / V, 3).tolist(),
+                        "cp": np.round(t_p / (0.5 * V * V), 3).tolist()
+                    })
+
+            streamlines_json = {
+                "type": "real_openfoam_cfd",
+                "solver": "OpenFOAM-2312 simpleFoam",
+                "tracks_count": len(tracks),
+                "tracks": tracks
+            }
+            with open(os.path.join(workdir, "streamlines.json"), "w") as f:
+                json.dump(streamlines_json, f)
+        except Exception as e:
+            print("Streamline extraction note:", e)
+
+    # 2. Parse surface Cp
+    cp_files = sorted(glob.glob(os.path.join(case, "postProcessing", "cpSurfaces", "*", "aircraft.vt[kp]")))
+    if cp_files:
+        try:
+            pts, p_vals = read_surface_file(cp_files[-1])
+            p_arr = np.array(p_vals, dtype=np.float32)
+            cp_arr = p_arr / (0.5 * V * V)
+            cp_bin_path = os.path.join(workdir, "surface_cp.bin")
+            cp_arr.tofile(cp_bin_path)
+        except Exception as e:
+            print("Surface Cp parse note:", e)
+
 def dot(a, b): return sum(x*y for x, y in zip(a, b))
 def reference_geometry(stl_path, bbox):
     """Planform reference area (projected on the x-y plane), span and mean chord from the STL. Returns None if it cannot be computed."""
@@ -471,6 +579,12 @@ def run_pipeline(step_path, workdir, emit, mesh_source_case=None, warm_start_cas
         else: res["notes"].append(f"Average wall y+ is {yp['avg']:.1f} (within the valid 30-300 wall function range).")
         res["cp"] = postprocess_cp(case, os.path.join(workdir, "cp_midspan.png"), CASE["V"], info["bbox_m"])
         if not res["cp"] or res["cp"].get("error"): res["warnings"].append("Cp plot unavailable: " + str((res["cp"] or {}).get("error", "unknown")))
+        try:
+            emit(type="log", m="Extracting real 3D streamlines and surface Cp from OpenFOAM solution...")
+            postprocess_3d_flow(case, workdir, CASE["V"], info["bbox_m"])
+            emit(type="flow_3d_ready", url=f"/runs/{os.path.basename(workdir)}/streamlines")
+        except Exception as e:
+            emit(type="log", m=f"3D flow post-processing note: {e}")
         fs = force_summary(parse_forces(case), meta["wind_dir"], meta["lift_dir"]); res["forces"] = fs
         ref = reference_geometry(os.path.join(case, "constant", "triSurface", "aircraft.stl"), info["bbox_m"]); res["reference"] = ref
         if fs and ref:

@@ -453,6 +453,10 @@ $("go").onclick=async()=>{
             log(`[error] ${e.m}`);
             $("status").innerHTML=`<b class="err">Error: ${esc(e.m)}</b>`;
           }
+          if(e.type==="flow_3d_ready"){
+            log("[3D Viewer] Real OpenFOAM streamlines and surface Cp available!");
+            loadRealCfdData(runId);
+          }
           if(e.type==="done"){
             es.close();
             finishLive(runId, e.status, e.results);
@@ -564,6 +568,7 @@ async function finishLive(runId,status,resObj){
 
   // Load updated STL in 3D viewer & transition to completed state
   loadAircraftModel(`/runs/${runId}/stl`, ()=>{
+    loadRealCfdData(runId);
     handleStage3DTransition(6);
   });
   handleStage3DTransition(6);
@@ -780,6 +785,11 @@ function init3DViewer(){
   // Animation Loop
   animate3D();
 
+  // Pre-load solved aircraft model and real OpenFOAM solution on startup
+  loadAircraftModel("/runs/fa8891fe/stl", ()=>{
+    loadRealCfdData("fa8891fe");
+  });
+
   // Window resize handler
   window.addEventListener("resize",()=>{
     if(!container||!renderer) return;
@@ -807,6 +817,124 @@ function buildProceduralPlaneGeometry(){
   return fuselage;
 }
 
+let realStreamlinesGroup=null;
+let hasRealStreamlines=false;
+
+function loadRealCfdData(runId){
+  if(!planeMesh || !planeMesh.userData) return;
+  const { origCenter, scale } = planeMesh.userData;
+
+  // 1. Fetch Real OpenFOAM Streamlines
+  fetch(`/runs/${runId}/streamlines`)
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {
+      if(!data || !data.tracks || data.tracks.length === 0) return;
+      console.log(`[3D] Loaded ${data.tracks.length} real OpenFOAM streamlines`);
+      hasRealStreamlines = true;
+
+      if(realStreamlinesGroup){
+        if(planeMesh) planeMesh.remove(realStreamlinesGroup);
+        realStreamlinesGroup = null;
+      }
+      realStreamlinesGroup = new THREE.Group();
+
+      data.tracks.forEach(track => {
+        const pts = [];
+        const colors = [];
+        const n = track.pts.length;
+        for(let k = 0; k < n; k++){
+          const [ox, oy, oz] = track.pts[k];
+          // Map to local planeMesh coordinates
+          const lx = (ox - origCenter.x) * scale;
+          const ly = (oy - origCenter.y) * scale;
+          const lz = (oz - origCenter.z) * scale;
+          pts.push(new THREE.Vector3(lx, ly, lz));
+
+          // Real velocity ratio color mapping
+          const uRat = track.u_ratio ? track.u_ratio[k] : 1.0;
+          let r = 0.14, g = 0.80, b = 0.32;
+          if(uRat > 1.25){
+            // Hot Crimson Red suction peak
+            r = 0.95; g = 0.16; b = 0.12;
+          } else if(uRat > 1.08){
+            // Radiant Yellow transition
+            r = 0.95; g = 0.82; b = 0.10;
+          } else if(uRat > 0.96){
+            // Emerald Green freestream
+            r = 0.14; g = 0.80; b = 0.32;
+          } else {
+            // Decelerated boundary layer / wake
+            r = 0.10; g = 0.75; b = 0.65;
+          }
+          colors.push(r, g, b);
+        }
+
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        const lineMat = new THREE.LineBasicMaterial({
+          vertexColors: true,
+          transparent: true,
+          opacity: 0.92,
+          depthWrite: false
+        });
+        const lineObj = new THREE.Line(geo, lineMat);
+        realStreamlinesGroup.add(lineObj);
+      });
+
+      planeMesh.add(realStreamlinesGroup);
+      realStreamlinesGroup.visible = streamlinesVisible;
+      if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
+      const b=$("v3d_badge");
+      if(b){ b.textContent = "OPENFOAM-2312 SOLUTION"; b.style.background = "#059669"; }
+      $("viewer3d_overlay").textContent = `Real OpenFOAM CFD Solution: ${data.tracks.length} Solved Navier-Stokes Streamlines`;
+    })
+    .catch(e => console.warn("Could not load real streamlines:", e));
+
+  // 2. Fetch Real Surface Cp binary
+  fetch(`/runs/${runId}/surface_cp.bin`)
+    .then(r => r.ok ? r.arrayBuffer() : null)
+    .then(buf => {
+      if(!buf || !planeMesh || !planeMesh.geometry) return;
+      const cpArr = new Float32Array(buf);
+      const geom = planeMesh.geometry;
+      const pos = geom.attributes.position;
+      if(!pos) return;
+      const count = pos.count;
+      if(cpArr.length !== count){
+        console.warn(`Cp count mismatch: ${cpArr.length} vs geom ${count}`);
+        return;
+      }
+      console.log(`[3D] Loaded ${count} real surface Cp values from OpenFOAM`);
+      const colors = new Float32Array(count * 3);
+
+      for(let i = 0; i < count; i++){
+        const cp = cpArr[i];
+        let r = 0.15, g = 0.75, b = 0.35;
+        if(cp > 0.4){
+          // High stagnation pressure (deep blue)
+          r = 0.08; g = 0.25; b = 0.85;
+        } else if(cp > 0.0){
+          // Positive pressure (teal)
+          r = 0.10; g = 0.80; b = 0.65;
+        } else if(cp > -0.6){
+          // Moderate suction (yellow)
+          r = 0.95; g = 0.80; b = 0.10;
+        } else {
+          // Peak suction (crimson red)
+          r = 0.95; g = 0.16; b = 0.12;
+        }
+        colors[i*3] = r;
+        colors[i*3+1] = g;
+        colors[i*3+2] = b;
+      }
+
+      geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geom.attributes.color.needsUpdate = true;
+      if(cpMat) cpMat.needsUpdate = true;
+    })
+    .catch(e => console.warn("Could not load real surface Cp:", e));
+}
+
 function loadAircraftModel(url, onLoaded){
   $("viewer3d_overlay").textContent="Loading 3D aircraft CAD geometry...";
   if(planeMesh){ scene.remove(planeMesh); planeMesh=null; }
@@ -814,11 +942,14 @@ function loadAircraftModel(url, onLoaded){
   const loader=new THREE.STLLoader();
   loader.load(url, geometry=>{
     geometry.computeVertexNormals();
-    geometry.center();
     geometry.computeBoundingBox();
-    const bb=geometry.boundingBox;
-    const maxDim=Math.max(bb.max.x-bb.min.x, bb.max.y-bb.min.y, bb.max.z-bb.min.z);
-    const scale=1.5/maxDim;
+    const rawBb = geometry.boundingBox.clone();
+    const origCenter = rawBb.getCenter(new THREE.Vector3());
+    const origSize = rawBb.getSize(new THREE.Vector3());
+    const maxDim = Math.max(origSize.x, origSize.y, origSize.z);
+    const scale = 1.5 / maxDim;
+
+    geometry.center();
     geometry.scale(scale, scale, scale);
 
     // Create Cp color attribute based on aerodynamic pressure gradient (Image 2 style)
@@ -827,11 +958,18 @@ function loadAircraftModel(url, onLoaded){
     const chosenMat=(renderMode==="cp"&&cpMat)?cpMat:(renderMode==="wire"?wireMat:solidMat);
     planeMesh=new THREE.Mesh(geometry, chosenMat);
     planeMesh.rotation.x=-Math.PI/2; // Orient nose toward -X / aerodynamic attitude
+    planeMesh.userData = { origCenter, scale, maxDim };
     scene.add(planeMesh);
     
-    // Automatically recalculate flow field streamlines to perfectly match loaded aircraft geometry
+    // Recalculate preview flow field streamlines
     createFlowVisualization();
     setStreamlines(streamlinesVisible);
+
+    // Check if real OpenFOAM streamlines and Cp are available for this run
+    const m = url.match(/\/runs\/([a-zA-Z0-9]+)\//);
+    if(m){
+      loadRealCfdData(m[1]);
+    }
 
     if(renderMode==="cp"){
       $("viewer3d_overlay").textContent="Simulation Solved: 3D Surface Pressure (Cp) & Aerodynamic Forces Computed";
@@ -1505,7 +1643,12 @@ function setStreamlines(active){
   if(active){
     setMeshingScanner(false);
   }
-  if(streamlineLinesGroup) streamlineLinesGroup.visible=(active && (flowStyle==="lines"||flowStyle==="both"));
+  if(realStreamlinesGroup){
+    realStreamlinesGroup.visible = active;
+    if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
+  } else {
+    if(streamlineLinesGroup) streamlineLinesGroup.visible=(active && (flowStyle==="lines"||flowStyle==="both"));
+  }
   if(streamlineParticleSystem) streamlineParticleSystem.visible=(active && (flowStyle==="dots"||flowStyle==="both"));
   const btn=$("btn_flow_toggle");
   if(btn){
