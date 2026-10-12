@@ -821,7 +821,7 @@ function loadAircraftModel(url, onLoaded){
     const scale=1.5/maxDim;
     geometry.scale(scale, scale, scale);
 
-    // Create Cp color attribute based on aerodynamic pressure gradient
+    // Create Cp color attribute based on aerodynamic pressure gradient (Image 2 style)
     createCpColors(geometry);
 
     const chosenMat=(renderMode==="cp"&&cpMat)?cpMat:(renderMode==="wire"?wireMat:solidMat);
@@ -829,6 +829,10 @@ function loadAircraftModel(url, onLoaded){
     planeMesh.rotation.x=-Math.PI/2; // Orient nose toward -X / aerodynamic attitude
     scene.add(planeMesh);
     
+    // Automatically recalculate flow field streamlines to perfectly match loaded aircraft geometry
+    createFlowVisualization();
+    setStreamlines(streamlinesVisible);
+
     if(renderMode==="cp"){
       $("viewer3d_overlay").textContent="Simulation Solved: 3D Surface Pressure (Cp) & Aerodynamic Forces Computed";
     }else{
@@ -843,6 +847,8 @@ function loadAircraftModel(url, onLoaded){
     createCpColors(fallbackGeom);
     planeMesh=new THREE.Mesh(fallbackGeom, solidMat);
     scene.add(planeMesh);
+    createFlowVisualization();
+    setStreamlines(streamlinesVisible);
     $("viewer3d_overlay").textContent="Displaying 3D Aircraft Model Preview";
     if(onLoaded) onLoaded();
   });
@@ -853,34 +859,64 @@ function createCpColors(geom){
   const pos=geom.attributes.position;
   const count=pos.count;
   const colors=new Float32Array(count*3);
-  
-  // Color palette: Red (High Pressure) -> Green -> Blue (Low Pressure / High Suction)
+  geom.computeBoundingBox();
+  const bb=geom.boundingBox;
+  const span=Math.max(0.5, Math.max(Math.abs(bb.min.y), Math.abs(bb.max.y)));
+
+  // Identify wing vertices to calculate real wing bounds
+  let wingLeX=1e9, wingTeX=-1e9, sumZ=0, wingCount=0;
   for(let i=0; i<count; i++){
-    const y=pos.getY(i), x=pos.getX(i);
-    // Upper wing / suction surface: deep blue to cyan (Cp -1.5)
-    // Stagnation nose & lower wing: orange to red (Cp +1.0)
-    if(y > 0.02){
-      // Suction peak: bright blue
-      colors[i*3] = 0.08; colors[i*3+1] = 0.55; colors[i*3+2] = 0.95;
-    } else if(x > 0.45){
-      // Stagnation nose: red/orange
-      colors[i*3] = 0.95; colors[i*3+1] = 0.25; colors[i*3+2] = 0.15;
+    const vy=Math.abs(pos.getY(i));
+    if(vy > 0.28*span){
+      const vx=pos.getX(i);
+      const vz=pos.getZ(i);
+      if(vx < wingLeX) wingLeX=vx;
+      if(vx > wingTeX) wingTeX=vx;
+      sumZ += vz;
+      wingCount++;
+    }
+  }
+  const wingChord = Math.max(0.05, wingTeX - wingLeX);
+  const wingZMid = wingCount > 0 ? (sumZ / wingCount) : (bb.min.z + bb.max.z)/2;
+
+  for(let i=0; i<count; i++){
+    const vx=pos.getX(i);
+    const vy=Math.abs(pos.getY(i));
+    const vz=pos.getZ(i);
+    const isWing=(vy > 0.26*span);
+
+    if(isWing){
+      const isUpper=(vz >= wingZMid);
+      const chordFrac=Math.max(0, Math.min(1, (vx - wingLeX) / wingChord));
+      if(isUpper){
+        // Upper wing suction peak (matching Image 2)
+        if(chordFrac > 0.12 && chordFrac < 0.48){
+          colors[i*3]=0.95; colors[i*3+1]=0.18; colors[i*3+2]=0.12; // Crimson Red suction peak!
+        } else if(chordFrac >= 0.48 && chordFrac < 0.72){
+          colors[i*3]=0.95; colors[i*3+1]=0.80; colors[i*3+2]=0.10; // Radiant Yellow transition
+        } else {
+          colors[i*3]=0.18; colors[i*3+1]=0.80; colors[i*3+2]=0.32; // Green LE / TE
+        }
+      } else {
+        // Lower wing pressure side: high pressure teal
+        colors[i*3]=0.10; colors[i*3+1]=0.80; colors[i*3+2]=0.65;
+      }
     } else {
-      // Lower pressure side: green/teal
-      colors[i*3] = 0.10; colors[i*3+1] = 0.85; colors[i*3+2] = 0.55;
+      // Fuselage: Deep Navy Blue (matching Image 2)
+      colors[i*3]=0.08; colors[i*3+1]=0.26; colors[i*3+2]=0.82;
     }
   }
   geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   
   cpMat=new THREE.MeshStandardMaterial({
     vertexColors:true,
-    metalness:0.25,
-    roughness:0.45,
+    metalness:0.30,
+    roughness:0.40,
     side:THREE.DoubleSide
   });
 }
 
-// --- Meshing Domain Scanner (Option B) ---
+// --- Meshing Domain Scanner ---
 function createMeshingScanner(){
   meshingScanGroup=new THREE.Group();
   
@@ -919,7 +955,155 @@ function setMeshingScanner(active){
   if(meshingScanGroup) meshingScanGroup.visible=active;
 }
 
-// --- Aerodynamic Flow-Calculated Streamline Curves (Touching Surface & Contours) ---
+// --- Aerodynamic Flow-Calculated Streamline Curves (Matching Reference CFD Flow Visualization) ---
+function getAircraftBounds(){
+  if(planeMesh && planeMesh.geometry){
+    const geo=planeMesh.geometry;
+    geo.computeBoundingBox();
+    const pos=geo.attributes.position;
+    const count=pos.count;
+    
+    // In local STL: X is fuselage streamwise, Y is spanwise, Z is vertical height.
+    // When planeMesh has rotation.x = -Math.PI / 2:
+    // World X = local X
+    // World Y = local Z (vertical)
+    // World Z = -local Y (spanwise)
+    let minWx=1e9, maxWx=-1e9, minWy=1e9, maxWy=-1e9, minWz=1e9, maxWz=-1e9;
+    for(let i=0; i<count; i++){
+      const wx=pos.getX(i);
+      const wy=pos.getZ(i);
+      const wz=-pos.getY(i);
+      if(wx < minWx) minWx=wx; if(wx > maxWx) maxWx=wx;
+      if(wy < minWy) minWy=wy; if(wy > maxWy) maxWy=wy;
+      if(wz < minWz) minWz=wz; if(wz > maxWz) maxWz=wz;
+    }
+    const span=Math.max(0.5, Math.max(Math.abs(minWz), Math.abs(maxWz)));
+    
+    // Fuselage radius and vertical extent near centerline (|wz| < 0.18*span)
+    let fMinY=1e9, fMaxY=-1e9;
+    for(let i=0; i<count; i++){
+      const wz=-pos.getY(i);
+      if(Math.abs(wz) < 0.18*span){
+        const wy=pos.getZ(i);
+        if(wy < fMinY) fMinY=wy;
+        if(wy > fMaxY) fMaxY=wy;
+      }
+    }
+    const fuseRadius=Math.max(0.045, Math.min(0.12, (fMaxY - fMinY)*0.35));
+    const fuseCenterY=(fMaxY + fMinY)/2;
+
+    // Discretize the wingspan into 24 spanwise bins to find the exact LE, TE, upperY, lowerY for any z
+    const numBins=24;
+    const spanBins=[];
+    for(let b=0; b<numBins; b++){
+      const zCenter=-span + (b + 0.5)*(2*span/numBins);
+      spanBins.push({
+        z: zCenter,
+        leX: 1e9,
+        teX: -1e9,
+        upperY: -1e9,
+        lowerY: 1e9,
+        count: 0
+      });
+    }
+
+    const binWidth=2*span/numBins;
+    for(let i=0; i<count; i++){
+      const wx=pos.getX(i);
+      const wy=pos.getZ(i);
+      const wz=-pos.getY(i);
+      if(Math.abs(wz) > 0.25*span && wx < (minWx + (maxWx-minWx)*0.65)){
+        const bIdx=Math.floor((wz + span)/binWidth);
+        if(bIdx >= 0 && bIdx < numBins){
+          const bin=spanBins[bIdx];
+          bin.count++;
+          if(wx < bin.leX) bin.leX=wx;
+          if(wx > bin.teX) bin.teX=wx;
+          if(wy > bin.upperY) bin.upperY=wy;
+          if(wy < bin.lowerY) bin.lowerY=wy;
+        }
+      }
+    }
+
+    // Default values from populated bins
+    let globalWingUpper=-1e9, globalWingLower=1e9, globalWingLe=1e9, globalWingTe=-1e9;
+    spanBins.forEach(b=>{
+      if(b.count > 5){
+        if(b.upperY > globalWingUpper) globalWingUpper=b.upperY;
+        if(b.lowerY < globalWingLower) globalWingLower=b.lowerY;
+        if(b.leX < globalWingLe) globalWingLe=b.leX;
+        if(b.teX > globalWingTe) globalWingTe=b.teX;
+      }
+    });
+
+    if(globalWingUpper === -1e9){
+      globalWingUpper=0.0; globalWingLower=-0.04;
+      globalWingLe=minWx + (maxWx-minWx)*0.3;
+      globalWingTe=minWx + (maxWx-minWx)*0.55;
+    }
+
+    // Fill empty bins with neighboring or global values
+    spanBins.forEach(b=>{
+      if(b.count < 5){
+        b.leX=globalWingLe;
+        b.teX=globalWingTe;
+        b.upperY=globalWingUpper;
+        b.lowerY=globalWingLower;
+      }
+    });
+
+    return {
+      xNose: minWx,
+      xTail: maxWx,
+      span: span,
+      fuseRadius: fuseRadius,
+      fuseCenterY: fuseCenterY,
+      fuseTopY: fMaxY,
+      fuseBotY: fMinY,
+      spanBins: spanBins,
+      globalWingLe: globalWingLe,
+      globalWingTe: globalWingTe,
+      globalWingUpper: globalWingUpper,
+      globalWingLower: globalWingLower
+    };
+  }
+  return {
+    xNose: -0.65,
+    xTail: 0.65,
+    span: 0.75,
+    fuseRadius: 0.08,
+    fuseCenterY: 0.0,
+    fuseTopY: 0.12,
+    fuseBotY: -0.12,
+    spanBins: [],
+    globalWingLe: -0.24,
+    globalWingTe: -0.06,
+    globalWingUpper: -0.03,
+    globalWingLower: -0.05
+  };
+}
+
+function getWingProfileAtZ(z, bounds){
+  if(!bounds.spanBins || bounds.spanBins.length === 0){
+    return {
+      leX: bounds.globalWingLe,
+      teX: bounds.globalWingTe,
+      upperY: bounds.globalWingUpper,
+      lowerY: bounds.globalWingLower
+    };
+  }
+  const numBins=bounds.spanBins.length;
+  const binWidth=2*bounds.span/numBins;
+  const bIdx=Math.max(0, Math.min(numBins-1, Math.floor((z + bounds.span)/binWidth)));
+  const bin=bounds.spanBins[bIdx];
+  return {
+    leX: bin.leX,
+    teX: bin.teX,
+    upperY: bin.upperY,
+    lowerY: bin.lowerY
+  };
+}
+
 function createFlowVisualization(){
   if(streamlineLinesGroup){ scene.remove(streamlineLinesGroup); streamlineLinesGroup=null; }
   if(streamlineParticleSystem){ scene.remove(streamlineParticleSystem); streamlineParticleSystem=null; }
@@ -930,140 +1114,139 @@ function createFlowVisualization(){
 
   streamlineLinesGroup=new THREE.Group();
 
+  const bounds=getAircraftBounds();
   const aoaVal=parseFloat($("inp_a")?$("inp_a").value:4)||4;
   const aoaRad=(aoaVal*Math.PI)/180;
-  const downwashSlope=-Math.sin(aoaRad)*0.55;
+  const downwashSlope=-Math.sin(aoaRad)*0.45;
 
-  // 42 Aerodynamic Streamline Seeds across the span and surface
-  const seeds=[
-    // Fuselage contour lines (hugging nose, canopy, body)
-    { z:0.00, y:0.08, type:"fuse_top" },
-    { z:0.00, y:-0.06, type:"fuse_bot" },
-    { z:0.06, y:0.02, type:"fuse_side" },
-    { z:-0.06, y:0.02, type:"fuse_side" },
-    { z:0.05, y:0.05, type:"fuse_top" },
-    { z:-0.05, y:0.05, type:"fuse_top" },
+  const seeds=[];
+  const numSpanStations=32;
 
-    // Left Wing Upper (Suction surface hugging camber)
-    { z:0.14, y:0.035, type:"wing_upper" },
-    { z:0.22, y:0.035, type:"wing_upper" },
-    { z:0.30, y:0.035, type:"wing_upper" },
-    { z:0.40, y:0.035, type:"wing_upper" },
-    { z:0.50, y:0.035, type:"wing_upper" },
-    { z:0.58, y:0.035, type:"wing_upper" },
-    { z:0.63, y:0.030, type:"wing_upper" },
+  // 1. Wing Rake Streamlines (Dense spanwise rake matching Reference Image 2)
+  for(let s=0; s<numSpanStations; s++){
+    const frac=(s / (numSpanStations - 1)) * 2 - 1; // from -1.0 to +1.0
+    const z=frac * bounds.span * 1.02;
+    const isTip=(Math.abs(frac) >= 0.88);
+    const isFuse=(Math.abs(z) < bounds.fuseRadius * 1.15);
 
-    // Left Wing Lower (Pressure surface hugging bottom)
-    { z:0.14, y:-0.025, type:"wing_lower" },
-    { z:0.22, y:-0.025, type:"wing_lower" },
-    { z:0.30, y:-0.025, type:"wing_lower" },
-    { z:0.40, y:-0.025, type:"wing_lower" },
-    { z:0.50, y:-0.025, type:"wing_lower" },
-    { z:0.58, y:-0.025, type:"wing_lower" },
-    { z:0.63, y:-0.020, type:"wing_lower" },
+    if(!isFuse){
+      // Upper suction streamline (hugging upper wing camber)
+      seeds.push({
+        z: z,
+        yOffset: 0.012,
+        isUpper: true,
+        isTip: isTip,
+        type: isTip ? "tip_vortex" : "wing_upper"
+      });
+      // Lower pressure streamline (passing cleanly beneath wing)
+      seeds.push({
+        z: z,
+        yOffset: -0.018,
+        isUpper: false,
+        isTip: false,
+        type: "wing_lower"
+      });
+    }
+  }
 
-    // Right Wing Upper (Suction surface)
-    { z:-0.14, y:0.035, type:"wing_upper" },
-    { z:-0.22, y:0.035, type:"wing_upper" },
-    { z:-0.30, y:0.035, type:"wing_upper" },
-    { z:-0.40, y:0.035, type:"wing_upper" },
-    { z:-0.50, y:0.035, type:"wing_upper" },
-    { z:-0.58, y:0.035, type:"wing_upper" },
-    { z:-0.63, y:0.030, type:"wing_upper" },
+  // 2. Fuselage Streamlines (Smoothly wrapping nose & fuselage)
+  seeds.push({ z: 0.00, yOffset: bounds.fuseRadius + 0.02, isUpper: true, type: "fuse_top" });
+  seeds.push({ z: 0.00, yOffset: -bounds.fuseRadius - 0.02, isUpper: false, type: "fuse_bot" });
+  seeds.push({ z: bounds.fuseRadius + 0.02, yOffset: 0.0, isUpper: false, type: "fuse_side" });
+  seeds.push({ z: -bounds.fuseRadius - 0.02, yOffset: 0.0, isUpper: false, type: "fuse_side" });
+  seeds.push({ z: bounds.fuseRadius * 0.55, yOffset: bounds.fuseRadius * 0.75, isUpper: true, type: "fuse_top" });
+  seeds.push({ z: -bounds.fuseRadius * 0.55, yOffset: bounds.fuseRadius * 0.75, isUpper: true, type: "fuse_top" });
 
-    // Right Wing Lower (Pressure surface)
-    { z:-0.14, y:-0.025, type:"wing_lower" },
-    { z:-0.22, y:-0.025, type:"wing_lower" },
-    { z:-0.30, y:-0.025, type:"wing_lower" },
-    { z:-0.40, y:-0.025, type:"wing_lower" },
-    { z:-0.50, y:-0.025, type:"wing_lower" },
-    { z:-0.58, y:-0.025, type:"wing_lower" },
-    { z:-0.63, y:-0.020, type:"wing_lower" },
-
-    // Wingtip Trailing Vortex Spirals (Port & Starboard)
-    { z:0.65, y:0.015, type:"tip_vortex" },
-    { z:0.68, y:0.005, type:"tip_vortex" },
-    { z:-0.65, y:0.015, type:"tip_vortex" },
-    { z:-0.68, y:0.005, type:"tip_vortex" },
-
-    // Empennage / Tail Stabilizers
-    { z:0.00, y:0.16, type:"tail_fin" },
-    { z:0.18, y:0.03, type:"tail_stab" },
-    { z:-0.18, y:0.03, type:"tail_stab" }
-  ];
-
-  const numPointsPerLine=75;
+  const numPointsPerLine=95;
+  const xStart=bounds.xNose - 1.6; // Inflow rake in front of aircraft
+  const xEnd=bounds.xTail + 1.6; // Trailing wake downstream
 
   seeds.forEach((seed)=>{
     const pts=[];
     const colors=[];
+    const prof=getWingProfileAtZ(seed.z, bounds);
+    const chord=Math.max(0.04, prof.teX - prof.leX);
 
     for(let k=0; k<numPointsPerLine; k++){
-      const x=-1.6 + (k/(numPointsPerLine-1))*3.4; // x from -1.6 to +1.8
-      let y=seed.y;
+      const x=xStart + (k / (numPointsPerLine - 1)) * (xEnd - xStart);
+      let y=prof.upperY;
       let z=seed.z;
-      let rCol=0.18, gCol=0.72, bCol=0.96; // default freestream cyan
 
-      if(seed.type==="fuse_top"||seed.type==="fuse_bot"||seed.type==="fuse_side"){
-        // Hugging fuselage
-        if(x>-0.6 && x<0.6){
-          const fuseRad=0.065*Math.sin(Math.min(Math.PI, ((x+0.6)/1.2)*Math.PI));
-          if(seed.type==="fuse_top") y=fuseRad+0.015;
-          if(seed.type==="fuse_bot") y=-fuseRad-0.012;
-          if(seed.type==="fuse_side") z=(seed.z>0?1:-1)*(fuseRad+0.015);
-          rCol=0.35; gCol=0.85; bCol=0.95;
-        } else if(x>=0.6){
-          y += (x-0.6)*downwashSlope*0.3;
+      // Color defaults to CFD Vibrant Emerald Green (Image 2 style)
+      let rCol=0.12, gCol=0.80, bCol=0.30;
+
+      if(seed.type === "fuse_top" || seed.type === "fuse_bot" || seed.type === "fuse_side"){
+        // Streamlines following fuselage contour
+        if(x < bounds.xNose){
+          y=bounds.fuseCenterY + seed.yOffset - (bounds.xNose - x) * Math.sin(aoaRad) * 0.20;
+          rCol=0.12; gCol=0.80; bCol=0.30;
+        } else if(x >= bounds.xNose && x <= bounds.xTail){
+          const fx=(x - bounds.xNose) / Math.max(0.1, bounds.xTail - bounds.xNose);
+          const bodyRad=bounds.fuseRadius * Math.sin(Math.min(Math.PI, fx * Math.PI));
+          if(seed.type === "fuse_top") y=bounds.fuseCenterY + bodyRad + 0.016;
+          else if(seed.type === "fuse_bot") y=bounds.fuseCenterY - bodyRad - 0.014;
+          else if(seed.type === "fuse_side"){
+            z=(seed.z > 0 ? 1 : -1) * (bodyRad + 0.018);
+            y=bounds.fuseCenterY;
+          }
+          rCol=0.35; gCol=0.82; bCol=0.25;
+        } else {
+          y=bounds.fuseCenterY + seed.yOffset + (x - bounds.xTail) * downwashSlope;
+          rCol=0.12; gCol=0.80; bCol=0.30;
         }
-      } else if(seed.type==="wing_upper"){
-        // Hugging wing upper suction camber
-        if(x>=-0.15 && x<=0.25){
-          const chordFrac=(x-(-0.15))/0.40;
-          const camber=0.022 + 0.052*Math.sin(chordFrac*Math.PI)*(1.0-0.25*chordFrac);
-          y=camber+0.008; // touches within 8 mm of upper wing skin
-          // High-velocity suction color (yellow / golden amber)
-          rCol=0.98; gCol=0.76; bCol=0.12;
-        } else if(x>0.25){
-          // Downwash behind trailing edge
-          y=(0.022+0.008) + (x-0.25)*downwashSlope;
-          rCol=0.22; gCol=0.74; bCol=0.95;
-        } else if(x<-0.15 && x>-0.45){
-          // Leading edge stagnation deflection
-          const leDist=(-0.15-x)/0.30;
-          y=seed.y + (1-leDist)*0.012;
-        }
-      } else if(seed.type==="wing_lower"){
-        // Hugging wing lower pressure surface
-        if(x>=-0.15 && x<=0.25){
-          const chordFrac=(x-(-0.15))/0.40;
-          const lowerProfile=-0.015 - 0.016*Math.sin(chordFrac*Math.PI);
-          y=lowerProfile-0.008; // touches lower wing skin
-          // High-pressure color (emerald teal)
-          rCol=0.10; gCol=0.85; bCol=0.55;
-        } else if(x>0.25){
-          y=(-0.015-0.008) + (x-0.25)*downwashSlope;
-        }
-      } else if(seed.type==="tip_vortex"){
-        // Wingtip trailing vortex core
-        if(x>=0.20){
-          const dx=x-0.20;
-          const vRadius=0.055*(1-Math.exp(-dx*3.5));
-          const vAngle=dx*16.0;
-          const dir=(seed.z>0)?1:-1;
-          y=seed.y + Math.sin(vAngle)*vRadius + dx*downwashSlope;
-          z=seed.z + Math.cos(vAngle)*vRadius*dir;
-          // Wingtip vortex color (radiant purple / violet)
-          rCol=0.68; gCol=0.38; bCol=0.98;
-        }
-      } else if(seed.type==="tail_fin"){
-        if(x>0.45 && x<0.75){
-          y=0.18;
-          rCol=0.30; gCol=0.80; bCol=0.95;
-        }
-      } else if(seed.type==="tail_stab"){
-        if(x>0.50 && x<0.75){
-          y=0.028;
-          rCol=0.35; gCol=0.82; bCol=0.95;
+      } else {
+        // Wing Streamlines
+        if(x < bounds.xNose){
+          // Upstream freestream approach inclined by Angle of Attack
+          y=(seed.isUpper ? prof.upperY + 0.022 : prof.lowerY - 0.022) - (bounds.xNose - x) * Math.sin(aoaRad) * 0.22;
+          rCol=0.12; gCol=0.80; bCol=0.30; // Emerald Green
+        } else if(x >= bounds.xNose && x < prof.leX){
+          // Deflection and smooth lift approaching wing leading edge
+          const u=(x - bounds.xNose) / Math.max(0.05, prof.leX - bounds.xNose);
+          y=(seed.isUpper ? prof.upperY + 0.022 : prof.lowerY - 0.022) + (seed.isUpper ? 0.012 * Math.sin(u * Math.PI * 0.5) : -0.008);
+          // Accelerating flow: Chartreuse / Lime Green
+          rCol=0.45; gCol=0.85; bCol=0.15;
+        } else if(x >= prof.leX && x <= prof.teX){
+          // Over wing chord: Drapes smoothly over suction camber and accelerates over suction peak
+          const chordFrac=(x - prof.leX) / chord;
+          if(seed.isUpper){
+            // Suction camber hump: hugs upper wing skin without cutting through
+            const camberHump=0.038 * Math.sin(Math.pow(chordFrac, 0.65) * Math.PI) * (1.0 - 0.20 * chordFrac);
+            y=prof.upperY + camberHump + Math.max(0.008, seed.yOffset);
+            
+            // Image 2 exact palette: High suction turns Bright Yellow to Crimson Red!
+            if(chordFrac >= 0.12 && chordFrac <= 0.48){
+              // Suction peak: Hot Crimson Red
+              rCol=0.94; gCol=0.18; bCol=0.14;
+            } else if(chordFrac > 0.48 && chordFrac <= 0.72){
+              // Radiant Yellow transition
+              rCol=0.95; gCol=0.80; bCol=0.10;
+            } else {
+              // Green leading/trailing edge
+              rCol=0.25; gCol=0.82; bCol=0.25;
+            }
+          } else {
+            // Lower pressure surface: stays just beneath wing
+            y=prof.lowerY - 0.008 * Math.sin(chordFrac * Math.PI) + seed.yOffset;
+            rCol=0.10; gCol=0.80; bCol=0.60;
+          }
+        } else {
+          // Downstream wake behind trailing edge: Downwash and wingtip vortex curls
+          const dx=x - prof.teX;
+          if(seed.type === "tip_vortex"){
+            // Wingtip trailing vortex spiral (Image 2 style)
+            const vRadius=0.045 * (1.0 - Math.exp(-dx * 3.5));
+            const vAngle=dx * 16.0;
+            const dir=(seed.z > 0) ? 1 : -1;
+            y=prof.upperY + 0.012 + Math.sin(vAngle) * vRadius + dx * downwashSlope;
+            z=seed.z + Math.cos(vAngle) * vRadius * dir;
+            // Neon Violet / Purple trailing vortex highlight
+            rCol=0.70; gCol=0.35; bCol=0.96;
+          } else {
+            // Wake downwash
+            y=(seed.isUpper ? prof.upperY + 0.012 : prof.lowerY - 0.012) + dx * downwashSlope;
+            rCol=0.14; gCol=0.80; bCol=0.32; // Emerald Green
+          }
         }
       }
 
@@ -1073,11 +1256,10 @@ function createFlowVisualization(){
 
     streamlineCurves.push({ pts, colors });
 
-    // Build Continuous 3D Line Ribbons
+    // Build Continuous 3D Line Ribbons (Image 2 style)
     const geo=new THREE.BufferGeometry().setFromPoints(pts);
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    
-    // Compute exact line distances for dashing safely without non-existent method
+
     let dist=0;
     const distances=new Float32Array(pts.length);
     distances[0]=0;
@@ -1088,29 +1270,78 @@ function createFlowVisualization(){
     geo.setAttribute('lineDistance', new THREE.BufferAttribute(distances, 1));
     streamlineLineGeoms.push(geo);
 
-    // Base continuous contour line
-    const baseMat=new THREE.LineBasicMaterial({
+    // Continuous smooth aerodynamic streamline line (Image 2 style)
+    const lineMat=new THREE.LineBasicMaterial({
       vertexColors:true,
       transparent:true,
-      opacity:0.35,
+      opacity:0.90,
       depthWrite:false
     });
-    const baseLine=new THREE.Line(geo, baseMat);
-    streamlineLinesGroup.add(baseLine);
-
-    // Glowing animated dashed pulse line on top
-    const dashedMat=new THREE.LineDashedMaterial({
-      vertexColors:true,
-      dashSize:0.12,
-      gapSize:0.07,
-      transparent:true,
-      opacity:0.95,
-      depthWrite:false
-    });
-    const dashedLine=new THREE.Line(geo, dashedMat);
-    streamlineDashedMats.push(dashedMat);
-    streamlineLinesGroup.add(dashedLine);
+    const lineObj=new THREE.Line(geo, lineMat);
+    streamlineLinesGroup.add(lineObj);
   });
+
+  // 3. Wake Vortex Contours (Concentric circular slices trailing behind wings, matching Image 2)
+  const wakeVortexGroup=new THREE.Group();
+  const wakeSpanStations=[-0.75 * bounds.span, -0.45 * bounds.span, 0.45 * bounds.span, 0.75 * bounds.span];
+  const wakeDists=[0.06, 0.16, 0.30, 0.48];
+  wakeSpanStations.forEach(wz=>{
+    const prof=getWingProfileAtZ(wz, bounds);
+    wakeDists.forEach(dx=>{
+      const ringX=prof.teX + dx;
+      const ringY=prof.upperY + dx * downwashSlope;
+      const numRingPts=24;
+      const r1=0.016 + dx * 0.02;
+
+      // Inner vortex ring (red / orange core)
+      const innerGeom=new THREE.BufferGeometry();
+      const innerPts=[];
+      for(let rp=0; rp<=numRingPts; rp++){
+        const th=(rp / numRingPts) * Math.PI * 2;
+        innerPts.push(new THREE.Vector3(ringX, ringY + Math.sin(th)*r1, wz + Math.cos(th)*r1));
+      }
+      innerGeom.setFromPoints(innerPts);
+      const innerLine=new THREE.Line(innerGeom, new THREE.LineBasicMaterial({
+        color:0xef4444,
+        transparent:true,
+        opacity:0.85
+      }));
+      wakeVortexGroup.add(innerLine);
+
+      // Middle ring (yellow)
+      const midGeom=new THREE.BufferGeometry();
+      const midPts=[];
+      const r2=r1 * 1.6;
+      for(let rp=0; rp<=numRingPts; rp++){
+        const th=(rp / numRingPts) * Math.PI * 2;
+        midPts.push(new THREE.Vector3(ringX, ringY + Math.sin(th)*r2, wz + Math.cos(th)*r2));
+      }
+      midGeom.setFromPoints(midPts);
+      const midLine=new THREE.Line(midGeom, new THREE.LineBasicMaterial({
+        color:0xeab308,
+        transparent:true,
+        opacity:0.70
+      }));
+      wakeVortexGroup.add(midLine);
+
+      // Outer ring (cyan / blue)
+      const outerGeom=new THREE.BufferGeometry();
+      const outerPts=[];
+      const r3=r1 * 2.3;
+      for(let rp=0; rp<=numRingPts; rp++){
+        const th=(rp / numRingPts) * Math.PI * 2;
+        outerPts.push(new THREE.Vector3(ringX, ringY + Math.sin(th)*r3, wz + Math.cos(th)*r3));
+      }
+      outerGeom.setFromPoints(outerPts);
+      const outerLine=new THREE.Line(outerGeom, new THREE.LineBasicMaterial({
+        color:0x38bdf8,
+        transparent:true,
+        opacity:0.50
+      }));
+      wakeVortexGroup.add(outerLine);
+    });
+  });
+  streamlineLinesGroup.add(wakeVortexGroup);
 
   streamlineLinesGroup.visible=false;
   scene.add(streamlineLinesGroup);
@@ -1120,7 +1351,7 @@ function createFlowVisualization(){
 }
 
 function createStreamlineParticleDots(){
-  const totalParticles=400;
+  const totalParticles=350;
   const positions=new Float32Array(totalParticles*3);
   const colors=new Float32Array(totalParticles*3);
   streamlineParticles=[];
@@ -1147,7 +1378,7 @@ function createStreamlineParticleDots(){
   pGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
   const pMat=new THREE.PointsMaterial({
-    size:0.038,
+    size:0.035,
     vertexColors:true,
     transparent:true,
     opacity:0.88,
@@ -1271,8 +1502,11 @@ function setRenderMode(mode){
 
 function setStreamlines(active){
   streamlinesVisible=active;
+  if(active){
+    setMeshingScanner(false);
+  }
   if(streamlineLinesGroup) streamlineLinesGroup.visible=(active && (flowStyle==="lines"||flowStyle==="both"));
-  if(streamlineParticleSystem) streamlineParticleSystem.visible=active;
+  if(streamlineParticleSystem) streamlineParticleSystem.visible=(active && (flowStyle==="dots"||flowStyle==="both"));
   const btn=$("btn_flow_toggle");
   if(btn){
     btn.textContent=active?"Streamlines: ON":"Streamlines: OFF";
@@ -1318,13 +1552,20 @@ $("btn_flow_toggle").onclick=()=>{
 };
 
 $("btn_flow_style").onclick=()=>{
-  flowStyle=(flowStyle==="lines")?"dots":"lines";
-  $("btn_flow_style").textContent=(flowStyle==="lines")?"Flow Style: Lines":"Flow Style: Dots";
-  $("btn_flow_style").style.background=(flowStyle==="lines")?"#0284c7":"#8b5cf6";
-  if(streamlinesVisible){
-    if(streamlineLinesGroup) streamlineLinesGroup.visible=(flowStyle==="lines");
-    if(streamlineParticleSystem) streamlineParticleSystem.visible=true;
+  if(flowStyle==="lines"){
+    flowStyle="dots";
+    $("btn_flow_style").textContent="Flow Style: Dots";
+    $("btn_flow_style").style.background="#8b5cf6";
+  } else if(flowStyle==="dots"){
+    flowStyle="both";
+    $("btn_flow_style").textContent="Flow Style: Lines + Dots";
+    $("btn_flow_style").style.background="#0284c7";
+  } else {
+    flowStyle="lines";
+    $("btn_flow_style").textContent="Flow Style: Lines";
+    $("btn_flow_style").style.background="#059669";
   }
+  setStreamlines(streamlinesVisible);
 };
 
 $("flow_speed_slider").oninput=e=>{
