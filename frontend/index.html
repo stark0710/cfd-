@@ -977,56 +977,6 @@ function loadRealCfdData(runId){
         realStreamlinesGroup.add(haloObj);
       });
 
-      // Add trailing wake vortex slices behind wings matching Image 2
-      if(rawBb){
-        const wakeVortexGroup = new THREE.Group();
-        const xTailLocal = (rawBb.max.x - origCenter.x) * scale;
-        const wingSpanLocal = (rawBb.max.y - rawBb.min.y) * scale;
-        const wingMidZ = ((rawBb.min.z + rawBb.max.z) / 2 - origCenter.z) * scale;
-        const spanLocs = [-0.42 * wingSpanLocal, -0.25 * wingSpanLocal, 0.25 * wingSpanLocal, 0.42 * wingSpanLocal];
-        const wakeDists = [0.06, 0.16, 0.30, 0.46];
-
-        spanLocs.forEach(wz => {
-          wakeDists.forEach(dx => {
-            const ringX = xTailLocal + dx;
-            const ringY = wz;
-            const ringZ = wingMidZ - dx * 0.05;
-            const numPts = 28;
-            const r1 = 0.016 + dx * 0.024;
-
-            // Inner crimson vortex core
-            const pts1 = [];
-            for(let p = 0; p <= numPts; p++){
-              const th = (p / numPts) * Math.PI * 2;
-              pts1.push(new THREE.Vector3(ringX, ringY + Math.cos(th)*r1, ringZ + Math.sin(th)*r1));
-            }
-            const g1 = new THREE.BufferGeometry().setFromPoints(pts1);
-            wakeVortexGroup.add(new THREE.Line(g1, new THREE.LineBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.88, depthWrite: false })));
-
-            // Middle radiant amber ring
-            const pts2 = [];
-            const r2 = r1 * 1.6;
-            for(let p = 0; p <= numPts; p++){
-              const th = (p / numPts) * Math.PI * 2;
-              pts2.push(new THREE.Vector3(ringX, ringY + Math.cos(th)*r2, ringZ + Math.sin(th)*r2));
-            }
-            const g2 = new THREE.BufferGeometry().setFromPoints(pts2);
-            wakeVortexGroup.add(new THREE.Line(g2, new THREE.LineBasicMaterial({ color: 0xeab308, transparent: true, opacity: 0.72, depthWrite: false })));
-
-            // Outer cyan dissipation ring
-            const pts3 = [];
-            const r3 = r1 * 2.3;
-            for(let p = 0; p <= numPts; p++){
-              const th = (p / numPts) * Math.PI * 2;
-              pts3.push(new THREE.Vector3(ringX, ringY + Math.cos(th)*r3, ringZ + Math.sin(th)*r3));
-            }
-            const g3 = new THREE.BufferGeometry().setFromPoints(pts3);
-            wakeVortexGroup.add(new THREE.Line(g3, new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.50, depthWrite: false })));
-          });
-        });
-        realStreamlinesGroup.add(wakeVortexGroup);
-      }
-
       planeMesh.add(realStreamlinesGroup);
       const showLines = streamlinesVisible && (flowStyle === "lines" || flowStyle === "both");
       realStreamlinesGroup.visible = showLines;
@@ -1571,73 +1521,27 @@ function createFlowVisualization(){
     streamlineLinesGroup.add(lineObj);
   });
 
-  // 3. Wake Vortex Contours (Concentric circular slices trailing behind wings, matching Image 2)
-  const wakeVortexGroup=new THREE.Group();
-  const wakeSpanStations=[-0.75 * bounds.span, -0.45 * bounds.span, 0.45 * bounds.span, 0.75 * bounds.span];
-  const wakeDists=[0.06, 0.16, 0.30, 0.48];
-  wakeSpanStations.forEach(wz=>{
-    const prof=getWingProfileAtZ(wz, bounds);
-    wakeDists.forEach(dx=>{
-      const ringX=prof.teX + dx;
-      const ringY=prof.upperY + dx * downwashSlope;
-      const numRingPts=24;
-      const r1=0.016 + dx * 0.02;
-
-      // Inner vortex ring (red / orange core)
-      const innerGeom=new THREE.BufferGeometry();
-      const innerPts=[];
-      for(let rp=0; rp<=numRingPts; rp++){
-        const th=(rp / numRingPts) * Math.PI * 2;
-        innerPts.push(new THREE.Vector3(ringX, ringY + Math.sin(th)*r1, wz + Math.cos(th)*r1));
-      }
-      innerGeom.setFromPoints(innerPts);
-      const innerLine=new THREE.Line(innerGeom, new THREE.LineBasicMaterial({
-        color:0xef4444,
-        transparent:true,
-        opacity:0.85
-      }));
-      wakeVortexGroup.add(innerLine);
-
-      // Middle ring (yellow)
-      const midGeom=new THREE.BufferGeometry();
-      const midPts=[];
-      const r2=r1 * 1.6;
-      for(let rp=0; rp<=numRingPts; rp++){
-        const th=(rp / numRingPts) * Math.PI * 2;
-        midPts.push(new THREE.Vector3(ringX, ringY + Math.sin(th)*r2, wz + Math.cos(th)*r2));
-      }
-      midGeom.setFromPoints(midPts);
-      const midLine=new THREE.Line(midGeom, new THREE.LineBasicMaterial({
-        color:0xeab308,
-        transparent:true,
-        opacity:0.70
-      }));
-      wakeVortexGroup.add(midLine);
-
-      // Outer ring (cyan / blue)
-      const outerGeom=new THREE.BufferGeometry();
-      const outerPts=[];
-      const r3=r1 * 2.3;
-      for(let rp=0; rp<=numRingPts; rp++){
-        const th=(rp / numRingPts) * Math.PI * 2;
-        outerPts.push(new THREE.Vector3(ringX, ringY + Math.sin(th)*r3, wz + Math.cos(th)*r3));
-      }
-      outerGeom.setFromPoints(outerPts);
-      const outerLine=new THREE.Line(outerGeom, new THREE.LineBasicMaterial({
-        color:0x38bdf8,
-        transparent:true,
-        opacity:0.50
-      }));
-      wakeVortexGroup.add(outerLine);
-    });
-  });
-  streamlineLinesGroup.add(wakeVortexGroup);
-
   streamlineLinesGroup.visible=false;
   scene.add(streamlineLinesGroup);
 
   // Build Particle Dots system traveling along the same curves
   createStreamlineParticleDots();
+}
+
+function getGlowDotTexture(){
+  if(window._glowDotTex) return window._glowDotTex;
+  const canvas=document.createElement('canvas');
+  canvas.width=64; canvas.height=64;
+  const ctx=canvas.getContext('2d');
+  const grad=ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+  grad.addColorStop(0.25, 'rgba(255, 255, 255, 0.85)');
+  grad.addColorStop(0.60, 'rgba(255, 255, 255, 0.25)');
+  grad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+  ctx.fillStyle=grad;
+  ctx.fillRect(0, 0, 64, 64);
+  window._glowDotTex=new THREE.CanvasTexture(canvas);
+  return window._glowDotTex;
 }
 
 function createStreamlineParticleDots(){
@@ -1648,7 +1552,7 @@ function createStreamlineParticleDots(){
   }
   if(!streamlineCurves || streamlineCurves.length === 0) return;
 
-  const totalParticles = Math.min(500, Math.max(250, streamlineCurves.length * 3));
+  const totalParticles = Math.min(450, Math.max(200, streamlineCurves.length * 3));
   const positions=new Float32Array(totalParticles*3);
   const colors=new Float32Array(totalParticles*3);
   streamlineParticles=[];
@@ -1675,10 +1579,11 @@ function createStreamlineParticleDots(){
   pGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
   const pMat=new THREE.PointsMaterial({
-    size:0.038,
+    size:0.020,
+    map:getGlowDotTexture(),
     vertexColors:true,
     transparent:true,
-    opacity:0.92,
+    opacity:0.88,
     blending:THREE.AdditiveBlending,
     depthWrite:false
   });

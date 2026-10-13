@@ -324,39 +324,40 @@ def postprocess_3d_flow(case, workdir, V, bbox):
     chord = max(0.1, x1 - x0)
     span = max(0.2, y1 - y0)
     height = max(0.05, z1 - z0)
-    seed_x = x0 - 0.15 * chord
+    seed_x = x0 - 0.42 * chord
 
     # Approximate wing and fuselage vertical stations
     # In aircraft geometries, wings and fuselage occupy the lower 40% of the box while the vertical fin extends upward
     z_wing = z0 + 0.28 * height
-    z_suction_high = z_wing + 0.08 * height
-    z_suction_low = z_wing + 0.03 * height
-    z_pressure = z_wing - 0.07 * height
+    z_suction_high = z_wing + 0.055 * height
+    z_suction_low = z_wing + 0.025 * height
+    z_stagnation = z_wing - 0.005 * height
+    z_pressure = z_wing - 0.040 * height
 
     points = []
-    # 1. Wing Upper Suction Rakes (grazing and high suction layer, turning yellow/red over suction peak)
-    for y in np.linspace(y0 * 0.92, y1 * 0.92, 35):
+    # 1. Wing Upper Suction Rakes (grazing and suction layer, turning yellow/red over suction peak)
+    for y in np.linspace(y0 * 0.90, y1 * 0.90, 32):
         points.append((seed_x, float(y), float(z_suction_low)))
         points.append((seed_x, float(y), float(z_suction_high)))
 
     # 2. Wing Leading Edge Impingement / Stagnation Rake
-    for y in np.linspace(y0 * 0.92, y1 * 0.92, 35):
-        points.append((seed_x, float(y), float(z_wing)))
+    for y in np.linspace(y0 * 0.90, y1 * 0.90, 28):
+        points.append((seed_x, float(y), float(z_stagnation)))
 
     # 3. Wing Lower Pressure Surface Rake
-    for y in np.linspace(y0 * 0.88, y1 * 0.88, 25):
+    for y in np.linspace(y0 * 0.85, y1 * 0.85, 20):
         points.append((seed_x, float(y), float(z_pressure)))
 
     # 4. Wingtip Vortex Cores
     for sgn in [-1, 1]:
-        for dy in [0.015 * span, 0.035 * span, 0.06 * span]:
+        for dy in [0.02 * span, 0.05 * span]:
             for dz in [z_wing, z_suction_low, z_suction_high]:
                 points.append((seed_x, float(sgn * (abs(y1) - dy)), float(dz)))
 
-    # 5. Fuselage, Nose & Canopy Rake
-    for z in np.linspace(z0 + 0.04 * height, z0 + 0.65 * height, 7):
-        for y in np.linspace(-0.065 * span, 0.065 * span, 5):
-            points.append((seed_x, float(y), float(z)))
+    # 5. Fuselage, Nose & Centerline Rake (seeded upstream so flow contours smoothly over nose and canopy)
+    for dz_rel in [-0.03, 0.0, 0.08, 0.16, 0.24]:
+        for y_rel in [0.0, -0.04 * span, 0.04 * span]:
+            points.append((seed_x, float(y_rel), float(z_wing + dz_rel * height)))
 
     pts_str = "\n".join([f"        ({p[0]:.4f} {p[1]:.4f} {p[2]:.4f})" for p in points])
 
@@ -403,7 +404,7 @@ seedSampleSet
             conn = get_arr(root.find(".//Lines/DataArray[@Name='connectivity']"), np.int32)
 
             u_mag = np.linalg.norm(u, axis=1)
-            x_cutoff = x1 + 1.6 * chord
+            x_cutoff = x1 + 1.25 * chord
 
             tracks = []
             start_idx = 0
