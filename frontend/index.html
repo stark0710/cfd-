@@ -893,58 +893,88 @@ function loadRealCfdData(runId){
       }
       realStreamlinesGroup = new THREE.Group();
 
-      // Clear and populate streamlineCurves with the real OpenFOAM tracks for animated particles
+      // Clear and populate streamlineCurves with spline-smoothed tracks for animated flow
       streamlineCurves = [];
+      streamlineLineGeoms = [];
 
       data.tracks.forEach(track => {
-        const pts = [];
-        const colors = [];
-        const haloColors = [];
+        const rawPts = [];
+        const rawColors = [];
         const n = track.pts.length;
+        if(n < 3) return;
+
         for(let k = 0; k < n; k++){
           const [ox, oy, oz] = track.pts[k];
           // Map to local planeMesh coordinates
           const lx = (ox - origCenter.x) * scale;
           const ly = (oy - origCenter.y) * scale;
           const lz = (oz - origCenter.z) * scale;
-          pts.push(new THREE.Vector3(lx, ly, lz));
+          rawPts.push(new THREE.Vector3(lx, ly, lz));
 
           // Continuous velocity ratio color mapping
           const uRat = track.u_ratio ? track.u_ratio[k] : 1.0;
-          const [r, g, b] = getCfdVelocityColor(uRat);
-          colors.push(r, g, b);
-          haloColors.push(r, g, b);
+          rawColors.push(getCfdVelocityColor(uRat));
         }
 
-        if(pts.length >= 2){
-          streamlineCurves.push({ pts, colors });
+        // CatmullRom centripetal spline smoothing for silky continuous flow ribbons
+        const curve = new THREE.CatmullRomCurve3(rawPts, false, 'centripetal');
+        const numSamples = Math.min(85, Math.max(35, rawPts.length * 2));
+        const smoothPts = curve.getPoints(numSamples);
 
-          const geo = new THREE.BufferGeometry().setFromPoints(pts);
-          geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-
-          // Primary aerodynamic streamline
-          const lineMat = new THREE.LineBasicMaterial({
-            vertexColors: true,
-            transparent: true,
-            opacity: 0.94,
-            depthWrite: false
-          });
-          const lineObj = new THREE.Line(geo, lineMat);
-          realStreamlinesGroup.add(lineObj);
-
-          // Luminous halo line (additive glow layer matching Image 3 wind tunnel aesthetic)
-          const haloGeo = new THREE.BufferGeometry().setFromPoints(pts);
-          haloGeo.setAttribute('color', new THREE.Float32BufferAttribute(haloColors, 3));
-          const haloMat = new THREE.LineBasicMaterial({
-            vertexColors: true,
-            transparent: true,
-            opacity: 0.38,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false
-          });
-          const haloObj = new THREE.Line(haloGeo, haloMat);
-          realStreamlinesGroup.add(haloObj);
+        const smoothColors = [];
+        const smoothHaloColors = [];
+        const numS = smoothPts.length;
+        const origLen = rawPts.length;
+        for(let s = 0; s < numS; s++){
+          const frac = s / (numS - 1);
+          const idx = Math.min(origLen - 2, Math.floor(frac * (origLen - 1)));
+          const f = frac * (origLen - 1) - idx;
+          const c0 = rawColors[idx], c1 = rawColors[idx + 1];
+          const r = c0[0] * (1 - f) + c1[0] * f;
+          const g = c0[1] * (1 - f) + c1[1] * f;
+          const b = c0[2] * (1 - f) + c1[2] * f;
+          smoothColors.push(r, g, b);
+          smoothHaloColors.push(r, g, b);
         }
+
+        streamlineCurves.push({ pts: smoothPts, colors: smoothColors });
+
+        const geo = new THREE.BufferGeometry().setFromPoints(smoothPts);
+        geo.setAttribute('color', new THREE.Float32BufferAttribute(smoothColors, 3));
+
+        // Animated distance attribute for flow dashes
+        let dist = 0;
+        const distances = new Float32Array(smoothPts.length);
+        distances[0] = 0;
+        for(let j = 1; j < smoothPts.length; j++){
+          dist += smoothPts[j].distanceTo(smoothPts[j - 1]);
+          distances[j] = dist;
+        }
+        geo.setAttribute('lineDistance', new THREE.BufferAttribute(distances, 1));
+        streamlineLineGeoms.push(geo);
+
+        // Core aerodynamic streamline
+        const lineMat = new THREE.LineBasicMaterial({
+          vertexColors: true,
+          transparent: true,
+          opacity: 0.94,
+          depthWrite: false
+        });
+        const lineObj = new THREE.Line(geo, lineMat);
+        realStreamlinesGroup.add(lineObj);
+
+        // Radiant luminous halo line (additive glow layer matching wind tunnel aesthetic)
+        const haloGeo = new THREE.BufferGeometry().setFromPoints(smoothPts);
+        haloGeo.setAttribute('color', new THREE.Float32BufferAttribute(smoothHaloColors, 3));
+        const haloMat = new THREE.LineBasicMaterial({
+          vertexColors: true,
+          transparent: true,
+          opacity: 0.38,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        });
+        const haloObj = new THREE.Line(haloGeo, haloMat);
+        realStreamlinesGroup.add(haloObj);
       });
 
       // Add trailing wake vortex slices behind wings matching Image 2
@@ -1003,22 +1033,21 @@ function loadRealCfdData(runId){
       if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
 
       // Re-create animated particle dots along real Navier-Stokes streamline pathways
-      if(streamlineParticleSystem){
-        scene.remove(streamlineParticleSystem);
-        if(planeMesh) planeMesh.remove(streamlineParticleSystem);
-        streamlineParticleSystem = null;
-      }
       createStreamlineParticleDots();
-      if(planeMesh && streamlineParticleSystem){
-        planeMesh.add(streamlineParticleSystem);
-        streamlineParticleSystem.visible = streamlinesVisible && (flowStyle === "dots" || flowStyle === "both");
-      }
 
       const b=$("v3d_badge");
       if(b){ b.textContent = "OPENFOAM-2312 SOLUTION"; b.style.background = "#059669"; }
       $("viewer3d_overlay").textContent = `Real OpenFOAM CFD Solution: ${data.tracks.length} Solved Navier-Stokes Streamlines & Surface Cp`;
     })
-    .catch(e => console.warn("Could not load real streamlines:", e));
+    .catch(e => {
+      console.warn("Could not load real streamlines:", e);
+      hasRealStreamlines = false;
+      if(realStreamlinesGroup){
+        if(planeMesh) planeMesh.remove(realStreamlinesGroup);
+        realStreamlinesGroup = null;
+      }
+      setStreamlines(streamlinesVisible);
+    });
 
   // 2. Fetch Real Surface Cp binary
   fetch(`/runs/${runId}/surface_cp.bin`)
@@ -1055,6 +1084,12 @@ function loadRealCfdData(runId){
 function loadAircraftModel(url, onLoaded){
   $("viewer3d_overlay").textContent="Loading 3D aircraft CAD geometry...";
   if(planeMesh){ scene.remove(planeMesh); planeMesh=null; }
+  realStreamlinesGroup = null;
+  hasRealStreamlines = false;
+  if(streamlineParticleSystem){
+    scene.remove(streamlineParticleSystem);
+    streamlineParticleSystem = null;
+  }
 
   const loader=new THREE.STLLoader();
   loader.load(url, geometry=>{
@@ -1606,7 +1641,14 @@ function createFlowVisualization(){
 }
 
 function createStreamlineParticleDots(){
-  const totalParticles=350;
+  if(streamlineParticleSystem){
+    scene.remove(streamlineParticleSystem);
+    if(planeMesh) planeMesh.remove(streamlineParticleSystem);
+    streamlineParticleSystem=null;
+  }
+  if(!streamlineCurves || streamlineCurves.length === 0) return;
+
+  const totalParticles = Math.min(500, Math.max(250, streamlineCurves.length * 3));
   const positions=new Float32Array(totalParticles*3);
   const colors=new Float32Array(totalParticles*3);
   streamlineParticles=[];
@@ -1614,7 +1656,7 @@ function createStreamlineParticleDots(){
   for(let i=0; i<totalParticles; i++){
     const curveIdx=i%streamlineCurves.length;
     const t=Math.random();
-    const speed=0.8 + Math.random()*0.4;
+    const speed=0.85 + Math.random()*0.35;
     streamlineParticles.push({ curveIdx, t, speed });
 
     const pt=sampleStreamlinePoint(curveIdx, t);
@@ -1633,17 +1675,21 @@ function createStreamlineParticleDots(){
   pGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
   const pMat=new THREE.PointsMaterial({
-    size:0.035,
+    size:0.038,
     vertexColors:true,
     transparent:true,
-    opacity:0.88,
+    opacity:0.92,
     blending:THREE.AdditiveBlending,
     depthWrite:false
   });
 
   streamlineParticleSystem=new THREE.Points(pGeo, pMat);
-  streamlineParticleSystem.visible=false;
-  scene.add(streamlineParticleSystem);
+  if(planeMesh){
+    planeMesh.add(streamlineParticleSystem);
+  } else {
+    scene.add(streamlineParticleSystem);
+  }
+  streamlineParticleSystem.visible = streamlinesVisible && (flowStyle==="dots"||flowStyle==="both");
 }
 
 function sampleStreamlinePoint(curveIdx, t){
@@ -1763,10 +1809,11 @@ function setStreamlines(active){
   const showLines = active && (flowStyle==="lines"||flowStyle==="both");
   const showDots = active && (flowStyle==="dots"||flowStyle==="both");
 
-  if(realStreamlinesGroup){
+  if(realStreamlinesGroup && hasRealStreamlines){
     realStreamlinesGroup.visible = showLines;
     if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
   } else {
+    if(realStreamlinesGroup) realStreamlinesGroup.visible = false;
     if(streamlineLinesGroup) streamlineLinesGroup.visible = showLines;
   }
   if(streamlineParticleSystem) streamlineParticleSystem.visible = showDots;
