@@ -893,9 +893,10 @@ function loadRealCfdData(runId){
       if(!data || !data.tracks || data.tracks.length === 0) return;
       console.log(`[3D] Loaded ${data.tracks.length} real OpenFOAM streamlines`);
       hasRealStreamlines = true;
+      dataTracksCount = data.tracks.length;
 
       if(realStreamlinesGroup){
-        if(planeMesh) planeMesh.remove(realStreamlinesGroup);
+        scene.remove(realStreamlinesGroup);
         realStreamlinesGroup = null;
       }
       realStreamlinesGroup = new THREE.Group();
@@ -984,7 +985,8 @@ function loadRealCfdData(runId){
         realStreamlinesGroup.add(haloObj);
       });
 
-      planeMesh.add(realStreamlinesGroup);
+      realStreamlinesGroup.rotation.x = -Math.PI / 2;
+      scene.add(realStreamlinesGroup);
       const showLines = streamlinesVisible && (flowStyle === "lines" || flowStyle === "both");
       realStreamlinesGroup.visible = showLines;
       if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
@@ -1000,7 +1002,8 @@ function loadRealCfdData(runId){
         .then(r => r.ok ? r.json() : null)
         .then(res => {
           if(res && res.settings && res.settings.alpha != null){
-            setViewerAoA(res.settings.alpha);
+            solvedCfdAoA = parseFloat(res.settings.alpha);
+            setViewerAoA(solvedCfdAoA);
           }
         })
         .catch(() => {});
@@ -1009,7 +1012,7 @@ function loadRealCfdData(runId){
       console.warn("Could not load real streamlines:", e);
       hasRealStreamlines = false;
       if(realStreamlinesGroup){
-        if(planeMesh) planeMesh.remove(realStreamlinesGroup);
+        scene.remove(realStreamlinesGroup);
         realStreamlinesGroup = null;
       }
       setStreamlines(streamlinesVisible);
@@ -1049,8 +1052,15 @@ function loadRealCfdData(runId){
 
 function loadAircraftModel(url, onLoaded){
   $("viewer3d_overlay").textContent="Loading 3D aircraft CAD geometry...";
-  if(planeMesh){ scene.remove(planeMesh); planeMesh=null; }
-  realStreamlinesGroup = null;
+  if(planeMesh){
+    if(planePivot) planePivot.remove(planeMesh);
+    else scene.remove(planeMesh);
+    planeMesh=null;
+  }
+  if(realStreamlinesGroup){
+    scene.remove(realStreamlinesGroup);
+    realStreamlinesGroup = null;
+  }
   hasRealStreamlines = false;
   if(streamlineParticleSystem){
     scene.remove(streamlineParticleSystem);
@@ -1471,7 +1481,8 @@ function createFlowVisualization(){
       if(seed.type === "fuse_top" || seed.type === "fuse_bot" || seed.type === "fuse_side"){
         // Streamlines following fuselage contour
         if(x < bounds.xNose){
-          y=bounds.fuseCenterY + seed.yOffset - (bounds.xNose - x) * Math.sin(aoaRad) * 0.20;
+          // Upstream freestream is 100% straight and horizontal (parallel to ground)
+          y=bounds.fuseCenterY + seed.yOffset;
           rCol=0.12; gCol=0.80; bCol=0.30;
         } else if(x >= bounds.xNose && x <= bounds.xTail){
           const fx=(x - bounds.xNose) / Math.max(0.1, bounds.xTail - bounds.xNose);
@@ -1490,8 +1501,8 @@ function createFlowVisualization(){
       } else {
         // Wing Streamlines
         if(x < bounds.xNose){
-          // Upstream freestream approach inclined by Angle of Attack
-          y=(seed.isUpper ? prof.upperY + 0.022 : prof.lowerY - 0.022) - (bounds.xNose - x) * Math.sin(aoaRad) * 0.22;
+          // Upstream freestream approach is 100% straight and horizontal (parallel to ground)
+          y=(seed.isUpper ? prof.upperY + seed.yOffset : prof.lowerY + seed.yOffset);
           rCol=0.12; gCol=0.80; bCol=0.30; // Emerald Green
         } else if(x >= bounds.xNose && x < prof.leX){
           // Deflection and smooth lift approaching wing leading edge
@@ -1575,11 +1586,7 @@ function createFlowVisualization(){
   });
 
   streamlineLinesGroup.visible=false;
-  if(planeMesh){
-    planeMesh.add(streamlineLinesGroup);
-  } else {
-    scene.add(streamlineLinesGroup);
-  }
+  scene.add(streamlineLinesGroup);
 
   // Build Particle Dots system traveling along the same curves
   createStreamlineParticleDots();
@@ -1604,7 +1611,6 @@ function getGlowDotTexture(){
 function createStreamlineParticleDots(){
   if(streamlineParticleSystem){
     scene.remove(streamlineParticleSystem);
-    if(planeMesh) planeMesh.remove(streamlineParticleSystem);
     streamlineParticleSystem=null;
   }
   if(!streamlineCurves || streamlineCurves.length === 0) return;
@@ -1646,11 +1652,7 @@ function createStreamlineParticleDots(){
   });
 
   streamlineParticleSystem=new THREE.Points(pGeo, pMat);
-  if(planeMesh){
-    planeMesh.add(streamlineParticleSystem);
-  } else {
-    scene.add(streamlineParticleSystem);
-  }
+  scene.add(streamlineParticleSystem);
   streamlineParticleSystem.visible = streamlinesVisible && (flowStyle==="dots"||flowStyle==="both");
 }
 
@@ -1844,6 +1846,8 @@ $("flow_speed_slider").oninput=e=>{
   flowSpeedMult=parseFloat(e.target.value)/3;
 };
 
+let solvedCfdAoA = null, dataTracksCount = 0;
+
 function setViewerAoA(aoa, updateInputs = true){
   currentModelAoA = parseFloat(aoa) || 0;
   if(planePivot){
@@ -1863,7 +1867,24 @@ function setViewerAoA(aoa, updateInputs = true){
   if(inpA && updateInputs){
     inpA.value = currentModelAoA;
   }
-  if(!hasRealStreamlines && planeMesh){
+
+  // If real OpenFOAM streamlines are available
+  if(hasRealStreamlines && realStreamlinesGroup && solvedCfdAoA !== null){
+    const isAtSolved = Math.abs(currentModelAoA - solvedCfdAoA) < 0.25;
+    if(isAtSolved){
+      realStreamlinesGroup.visible = streamlinesVisible && (flowStyle === "lines" || flowStyle === "both");
+      if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
+      const countTracks = dataTracksCount || (realStreamlinesGroup.children.length / 2);
+      $("viewer3d_overlay").textContent = `Real OpenFOAM CFD Solution: ${countTracks} Solved Navier-Stokes Streamlines & Surface Cp (${solvedCfdAoA >= 0 ? "+" : ""}${solvedCfdAoA.toFixed(1)}° AoA)`;
+      createStreamlineParticleDots();
+    } else {
+      // User moved AoA slider to preview different angle: flow is straight horizontal hitting tilted model
+      realStreamlinesGroup.visible = false;
+      createFlowVisualization();
+      setStreamlines(streamlinesVisible);
+      $("viewer3d_overlay").textContent = `Interactive Flow Preview: Model tilted to ${currentModelAoA >= 0 ? "+" : ""}${currentModelAoA.toFixed(1)}° AoA (Straight oncoming inflow hitting tilted model)`;
+    }
+  } else if(planeMesh){
     createFlowVisualization();
     setStreamlines(streamlinesVisible);
   }
