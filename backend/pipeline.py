@@ -324,40 +324,86 @@ def postprocess_3d_flow(case, workdir, V, bbox):
     chord = max(0.1, x1 - x0)
     span = max(0.2, y1 - y0)
     height = max(0.05, z1 - z0)
-    seed_x = x0 - 0.42 * chord
+    seed_x = x0 - 0.40 * chord
 
-    # Approximate wing and fuselage vertical stations
-    # In aircraft geometries, wings and fuselage occupy the lower 40% of the box while the vertical fin extends upward
-    z_wing = z0 + 0.28 * height
-    z_suction_high = z_wing + 0.055 * height
-    z_suction_low = z_wing + 0.025 * height
-    z_stagnation = z_wing - 0.005 * height
-    z_pressure = z_wing - 0.040 * height
+    # Read true velocity vector (accounts for angle of attack and side-slip)
+    ux, uy, uz = V, 0.0, 0.0
+    u_file = os.path.join(case, "0/U")
+    if os.path.exists(u_file):
+        try:
+            with open(u_file) as uf:
+                for uline in uf:
+                    if "internalField" in uline and "uniform" in uline:
+                        uparts = uline.split("(")[1].split(")")[0].split()
+                        ux, uy, uz = float(uparts[0]), float(uparts[1]), float(uparts[2])
+                        break
+        except Exception: pass
+
+    slope_z = uz / max(0.1, ux)
+    slope_y = uy / max(0.1, ux)
+
+    # Detect actual wing and fuselage geometry from aircraft.stl
+    stl_file = os.path.join(case, "constant/triSurface/aircraft.stl")
+    w_x_le, w_x_te = x0 + 0.25 * chord, x0 + 0.60 * chord
+    w_z_min, w_z_max = z0 + 0.25 * height, z0 + 0.35 * height
+    f_x_nose, f_z_min, f_z_max = x0, z0, z1
+    if os.path.exists(stl_file):
+        try:
+            verts = []
+            with open(stl_file) as sf:
+                for sline in sf:
+                    sline = sline.strip()
+                    if sline.startswith("vertex"):
+                        sp = sline.split()
+                        verts.append([float(sp[1]), float(sp[2]), float(sp[3])])
+            if verts:
+                vpts = np.array(verts)
+                outboard = vpts[np.abs(vpts[:, 1]) > 0.20 * span]
+                if len(outboard) > 0:
+                    w_x_le = float(np.min(outboard[:, 0]))
+                    w_x_te = float(np.max(outboard[:, 0]))
+                    w_z_min = float(np.min(outboard[:, 2]))
+                    w_z_max = float(np.max(outboard[:, 2]))
+                fuse = vpts[np.abs(vpts[:, 1]) <= 0.08 * span]
+                if len(fuse) > 0:
+                    f_x_nose = float(np.min(fuse[:, 0]))
+                    f_z_min = float(np.min(fuse[:, 2]))
+                    f_z_max = float(np.max(fuse[:, 2]))
+        except Exception: pass
+
+    w_z_mid = 0.5 * (w_z_min + w_z_max)
+    w_chord = max(0.05, w_x_te - w_x_le)
+
+    def project_upstream(x_tgt, y_tgt, z_tgt):
+        dx = x_tgt - seed_x
+        return (seed_x, float(y_tgt - dx * slope_y), float(z_tgt - dx * slope_z))
 
     points = []
-    # 1. Wing Upper Suction Rakes (grazing and suction layer, turning yellow/red over suction peak)
-    for y in np.linspace(y0 * 0.90, y1 * 0.90, 32):
-        points.append((seed_x, float(y), float(z_suction_low)))
-        points.append((seed_x, float(y), float(z_suction_high)))
+    # 1. Wing Upper Suction (grazing skin + suction peak layer)
+    for y in np.linspace(y0 * 0.92, y1 * 0.92, 34):
+        points.append(project_upstream(w_x_le + 0.15 * w_chord, y, w_z_max + 0.003 * chord))
+        points.append(project_upstream(w_x_le + 0.20 * w_chord, y, w_z_max + 0.018 * chord))
 
-    # 2. Wing Leading Edge Impingement / Stagnation Rake
-    for y in np.linspace(y0 * 0.90, y1 * 0.90, 28):
-        points.append((seed_x, float(y), float(z_stagnation)))
+    # 2. Wing Leading Edge Impingement / Stagnation Line
+    for y in np.linspace(y0 * 0.92, y1 * 0.92, 30):
+        points.append(project_upstream(w_x_le, y, w_z_mid))
 
-    # 3. Wing Lower Pressure Surface Rake
-    for y in np.linspace(y0 * 0.85, y1 * 0.85, 20):
-        points.append((seed_x, float(y), float(z_pressure)))
+    # 3. Wing Lower Pressure Surface (underside flow)
+    for y in np.linspace(y0 * 0.88, y1 * 0.88, 26):
+        points.append(project_upstream(w_x_le + 0.20 * w_chord, y, w_z_min - 0.006 * chord))
+        points.append(project_upstream(w_x_le + 0.35 * w_chord, y, w_z_min - 0.020 * chord))
 
-    # 4. Wingtip Vortex Cores
+    # 4. Wingtip Vortex Rollups
     for sgn in [-1, 1]:
-        for dy in [0.02 * span, 0.05 * span]:
-            for dz in [z_wing, z_suction_low, z_suction_high]:
-                points.append((seed_x, float(sgn * (abs(y1) - dy)), float(dz)))
+        tip_y = sgn * (0.5 * span - 0.02 * span)
+        for dy in [0.005 * span, 0.02 * span]:
+            points.append(project_upstream(w_x_le + 0.4 * w_chord, tip_y - sgn * dy, w_z_mid))
+            points.append(project_upstream(w_x_le + 0.4 * w_chord, tip_y - sgn * dy, w_z_max + 0.01 * chord))
 
-    # 5. Fuselage, Nose & Centerline Rake (seeded upstream so flow contours smoothly over nose and canopy)
-    for dz_rel in [-0.03, 0.0, 0.08, 0.16, 0.24]:
+    # 5. Fuselage Belly, Nose, Flanks and Canopy
+    for z_rel in np.linspace(f_z_min - 0.01 * chord, f_z_max * 0.7, 8):
         for y_rel in [0.0, -0.04 * span, 0.04 * span]:
-            points.append((seed_x, float(y_rel), float(z_wing + dz_rel * height)))
+            points.append(project_upstream(f_x_nose + 0.15 * chord, y_rel, z_rel))
 
     pts_str = "\n".join([f"        ({p[0]:.4f} {p[1]:.4f} {p[2]:.4f})" for p in points])
 
