@@ -95,8 +95,13 @@ textarea{width:100%;height:140px;font:11.5px ui-monospace,monospace;background:v
       <button type="button" class="btn-sm" id="btn_flow_style" style="background:#0284c7">Flow Style: Lines</button>
       <button type="button" class="btn-sm" id="btn_cam_reset" style="background:var(--mu)">Reset View</button>
     </div>
-    <div style="font-size:12px;color:var(--mu);display:flex;gap:12px;align-items:center">
-      <span>Flow Speed: <input type="range" id="flow_speed_slider" min="1" max="5" value="3" style="width:70px;vertical-align:middle"></span>
+    <div style="font-size:12px;color:var(--mu);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#1e293b;padding:3px 9px;border-radius:6px;border:1px solid #334155">
+        <span style="color:#94a3b8;font-weight:600">AoA:</span>
+        <input type="range" id="v3d_aoa_slider" min="-6" max="16" value="4" step="0.5" style="width:75px;vertical-align:middle">
+        <span id="v3d_aoa_badge" style="color:#38bdf8;font-weight:700;min-width:38px;text-align:right">+4.0°</span>
+      </div>
+      <span>Flow Speed: <input type="range" id="flow_speed_slider" min="1" max="5" value="3" style="width:60px;vertical-align:middle"></span>
       <span id="v3d_stats">Rotate: Left-Click · Pan: Right-Click · Zoom: Scroll</span>
     </div>
   </div>
@@ -712,7 +717,7 @@ function renderYPlusSummary(yplusAvg, coveragePct){
 // 3D WEBGL AIRCRAFT VIEWER & LIVE FLOW STREAMLINE SIMULATION (Three.js)
 // =========================================================================
 let scene, camera, renderer, controls;
-let planeMesh=null, solidMat, wireMat, cpMat;
+let planeMesh=null, planePivot=null, currentModelAoA=4.0, solidMat, wireMat, cpMat;
 let flowStyle="lines"; // "lines" or "dots"
 let streamlineLinesGroup=null, streamlineParticleSystem=null;
 let streamlineLineGeoms=[], streamlineDashedMats=[], streamlineCurves=[], streamlineParticles=[];
@@ -730,6 +735,8 @@ function init3DViewer(){
   
   // Scene & Camera
   scene=new THREE.Scene();
+  planePivot=new THREE.Group();
+  scene.add(planePivot);
   camera=new THREE.PerspectiveCamera(45, W/H, 0.05, 50);
   camera.position.set(2.4, 1.4, 2.2);
 
@@ -988,6 +995,15 @@ function loadRealCfdData(runId){
       const b=$("v3d_badge");
       if(b){ b.textContent = "OPENFOAM-2312 SOLUTION"; b.style.background = "#059669"; }
       $("viewer3d_overlay").textContent = `Real OpenFOAM CFD Solution: ${data.tracks.length} Solved Navier-Stokes Streamlines & Surface Cp`;
+
+      fetch(`/runs/${runId}/results.json`)
+        .then(r => r.ok ? r.json() : null)
+        .then(res => {
+          if(res && res.settings && res.settings.alpha != null){
+            setViewerAoA(res.settings.alpha);
+          }
+        })
+        .catch(() => {});
     })
     .catch(e => {
       console.warn("Could not load real streamlines:", e);
@@ -1061,7 +1077,12 @@ function loadAircraftModel(url, onLoaded){
     planeMesh=new THREE.Mesh(geometry, chosenMat);
     planeMesh.rotation.x=-Math.PI/2; // Orient nose toward -X / aerodynamic attitude
     planeMesh.userData = { origCenter, scale, maxDim, rawBb, origSize };
-    scene.add(planeMesh);
+    if(planePivot){
+      planePivot.add(planeMesh);
+      planePivot.rotation.z = -THREE.MathUtils.degToRad(currentModelAoA);
+    } else {
+      scene.add(planeMesh);
+    }
     
     // Recalculate preview flow field streamlines
     createFlowVisualization();
@@ -1086,7 +1107,12 @@ function loadAircraftModel(url, onLoaded){
     fallbackGeom.rotateZ(Math.PI/2);
     createCpColors(fallbackGeom);
     planeMesh=new THREE.Mesh(fallbackGeom, solidMat);
-    scene.add(planeMesh);
+    if(planePivot){
+      planePivot.add(planeMesh);
+      planePivot.rotation.z = -THREE.MathUtils.degToRad(currentModelAoA);
+    } else {
+      scene.add(planeMesh);
+    }
     createFlowVisualization();
     setStreamlines(streamlinesVisible);
     $("viewer3d_overlay").textContent="Displaying 3D Aircraft Model Preview";
@@ -1345,8 +1371,16 @@ function getWingProfileAtZ(z, bounds){
 }
 
 function createFlowVisualization(){
-  if(streamlineLinesGroup){ scene.remove(streamlineLinesGroup); streamlineLinesGroup=null; }
-  if(streamlineParticleSystem){ scene.remove(streamlineParticleSystem); streamlineParticleSystem=null; }
+  if(streamlineLinesGroup){
+    if(planeMesh) planeMesh.remove(streamlineLinesGroup);
+    scene.remove(streamlineLinesGroup);
+    streamlineLinesGroup=null;
+  }
+  if(streamlineParticleSystem){
+    if(planeMesh) planeMesh.remove(streamlineParticleSystem);
+    scene.remove(streamlineParticleSystem);
+    streamlineParticleSystem=null;
+  }
   streamlineLineGeoms=[];
   streamlineDashedMats=[];
   streamlineCurves=[];
@@ -1355,14 +1389,14 @@ function createFlowVisualization(){
   streamlineLinesGroup=new THREE.Group();
 
   const bounds=getAircraftBounds();
-  const aoaVal=parseFloat($("inp_a")?$("inp_a").value:4)||4;
+  const aoaVal=currentModelAoA;
   const aoaRad=(aoaVal*Math.PI)/180;
   const downwashSlope=-Math.sin(aoaRad)*0.45;
 
   const seeds=[];
-  const numSpanStations=32;
+  const numSpanStations=64; // Denser span rake: 64 stations across wing
 
-  // 1. Wing Rake Streamlines (Dense spanwise rake matching Reference Image 2)
+  // 1. Wing Rake Streamlines (4 layers x 64 stations)
   for(let s=0; s<numSpanStations; s++){
     const frac=(s / (numSpanStations - 1)) * 2 - 1; // from -1.0 to +1.0
     const z=frac * bounds.span * 1.02;
@@ -1370,18 +1404,34 @@ function createFlowVisualization(){
     const isFuse=(Math.abs(z) < bounds.fuseRadius * 1.15);
 
     if(!isFuse){
-      // Upper suction streamline (hugging upper wing camber)
+      // Upper suction grazing streamline
       seeds.push({
         z: z,
-        yOffset: 0.012,
+        yOffset: 0.008,
         isUpper: true,
         isTip: isTip,
         type: isTip ? "tip_vortex" : "wing_upper"
       });
-      // Lower pressure streamline (passing cleanly beneath wing)
+      // Upper boundary layer streamline
       seeds.push({
         z: z,
-        yOffset: -0.018,
+        yOffset: 0.022,
+        isUpper: true,
+        isTip: isTip,
+        type: isTip ? "tip_vortex" : "wing_upper"
+      });
+      // Lower pressure streamline
+      seeds.push({
+        z: z,
+        yOffset: -0.012,
+        isUpper: false,
+        isTip: false,
+        type: "wing_lower"
+      });
+      // Deep lower streamline
+      seeds.push({
+        z: z,
+        yOffset: -0.028,
         isUpper: false,
         isTip: false,
         type: "wing_lower"
@@ -1389,13 +1439,16 @@ function createFlowVisualization(){
     }
   }
 
-  // 2. Fuselage Streamlines (Smoothly wrapping nose & fuselage)
-  seeds.push({ z: 0.00, yOffset: bounds.fuseRadius + 0.02, isUpper: true, type: "fuse_top" });
-  seeds.push({ z: 0.00, yOffset: -bounds.fuseRadius - 0.02, isUpper: false, type: "fuse_bot" });
-  seeds.push({ z: bounds.fuseRadius + 0.02, yOffset: 0.0, isUpper: false, type: "fuse_side" });
-  seeds.push({ z: -bounds.fuseRadius - 0.02, yOffset: 0.0, isUpper: false, type: "fuse_side" });
-  seeds.push({ z: bounds.fuseRadius * 0.55, yOffset: bounds.fuseRadius * 0.75, isUpper: true, type: "fuse_top" });
-  seeds.push({ z: -bounds.fuseRadius * 0.55, yOffset: bounds.fuseRadius * 0.75, isUpper: true, type: "fuse_top" });
+  // 2. Fuselage Streamlines (8 tracks wrapping belly, flanks, and canopy)
+  const fR=bounds.fuseRadius;
+  seeds.push({ z: 0.00, yOffset: fR + 0.024, isUpper: true, type: "fuse_top" });
+  seeds.push({ z: 0.00, yOffset: -fR - 0.024, isUpper: false, type: "fuse_bot" });
+  seeds.push({ z: fR + 0.024, yOffset: 0.0, isUpper: false, type: "fuse_side" });
+  seeds.push({ z: -fR - 0.024, yOffset: 0.0, isUpper: false, type: "fuse_side" });
+  seeds.push({ z: fR * 0.60, yOffset: fR * 0.68, isUpper: true, type: "fuse_top" });
+  seeds.push({ z: -fR * 0.60, yOffset: fR * 0.68, isUpper: true, type: "fuse_top" });
+  seeds.push({ z: fR * 0.60, yOffset: -fR * 0.68, isUpper: false, type: "fuse_bot" });
+  seeds.push({ z: -fR * 0.60, yOffset: -fR * 0.68, isUpper: false, type: "fuse_bot" });
 
   const numPointsPerLine=95;
   const xStart=bounds.xNose - 1.6; // Inflow rake in front of aircraft
@@ -1522,7 +1575,11 @@ function createFlowVisualization(){
   });
 
   streamlineLinesGroup.visible=false;
-  scene.add(streamlineLinesGroup);
+  if(planeMesh){
+    planeMesh.add(streamlineLinesGroup);
+  } else {
+    scene.add(streamlineLinesGroup);
+  }
 
   // Build Particle Dots system traveling along the same curves
   createStreamlineParticleDots();
@@ -1552,7 +1609,7 @@ function createStreamlineParticleDots(){
   }
   if(!streamlineCurves || streamlineCurves.length === 0) return;
 
-  const totalParticles = Math.min(450, Math.max(200, streamlineCurves.length * 3));
+  const totalParticles = Math.min(950, Math.max(400, streamlineCurves.length * 3));
   const positions=new Float32Array(totalParticles*3);
   const colors=new Float32Array(totalParticles*3);
   streamlineParticles=[];
@@ -1787,6 +1844,39 @@ $("flow_speed_slider").oninput=e=>{
   flowSpeedMult=parseFloat(e.target.value)/3;
 };
 
+function setViewerAoA(aoa, updateInputs = true){
+  currentModelAoA = parseFloat(aoa) || 0;
+  if(planePivot){
+    planePivot.rotation.z = -THREE.MathUtils.degToRad(currentModelAoA);
+  } else if(planeMesh){
+    planeMesh.rotation.z = -THREE.MathUtils.degToRad(currentModelAoA);
+  }
+  const badge = $("v3d_aoa_badge");
+  if(badge){
+    badge.textContent = (currentModelAoA >= 0 ? "+" : "") + currentModelAoA.toFixed(1) + "°";
+  }
+  const slider = $("v3d_aoa_slider");
+  if(slider && updateInputs){
+    slider.value = currentModelAoA;
+  }
+  const inpA = $("inp_a");
+  if(inpA && updateInputs){
+    inpA.value = currentModelAoA;
+  }
+  if(!hasRealStreamlines && planeMesh){
+    createFlowVisualization();
+    setStreamlines(streamlinesVisible);
+  }
+}
+
+if($("v3d_aoa_slider")){
+  $("v3d_aoa_slider").oninput = e => {
+    setViewerAoA(parseFloat(e.target.value), false);
+    if($("inp_a")) $("inp_a").value = e.target.value;
+    updateFlightConditions();
+  };
+}
+
 $("btn_cam_reset").onclick=()=>{
   if(camera&&controls){
     camera.position.set(2.4, 1.4, 2.2);
@@ -1794,11 +1884,13 @@ $("btn_cam_reset").onclick=()=>{
   }
 };
 
-$("inp_a").addEventListener("change",()=>{
-  if(typeof createFlowVisualization==="function"){
-    createFlowVisualization();
-    setStreamlines(streamlinesVisible);
-  }
+$("inp_a").addEventListener("input", e => {
+  setViewerAoA(parseFloat(e.target.value) || 0, false);
+  if($("v3d_aoa_slider")) $("v3d_aoa_slider").value = e.target.value;
+});
+
+$("inp_a").addEventListener("change", e => {
+  setViewerAoA(parseFloat(e.target.value) || 0, true);
 });
 
 // Initial Setup Calls

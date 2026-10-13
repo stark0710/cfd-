@@ -379,30 +379,30 @@ def postprocess_3d_flow(case, workdir, V, bbox):
         return (seed_x, float(y_tgt - dx * slope_y), float(z_tgt - dx * slope_z))
 
     points = []
-    # 1. Wing Upper Suction (grazing skin + suction peak layer)
-    for y in np.linspace(y0 * 0.92, y1 * 0.92, 34):
-        points.append(project_upstream(w_x_le + 0.15 * w_chord, y, w_z_max + 0.003 * chord))
-        points.append(project_upstream(w_x_le + 0.20 * w_chord, y, w_z_max + 0.018 * chord))
+    # 1. Dense Wing Upper Suction (70 stations x 2 layers = 140 lines)
+    for y in np.linspace(y0 * 0.94, y1 * 0.94, 70):
+        points.append(project_upstream(w_x_le + 0.15 * w_chord, y, w_z_max + 0.002 * chord))
+        points.append(project_upstream(w_x_le + 0.20 * w_chord, y, w_z_max + 0.014 * chord))
 
-    # 2. Wing Leading Edge Impingement / Stagnation Line
-    for y in np.linspace(y0 * 0.92, y1 * 0.92, 30):
+    # 2. Dense Wing Leading Edge Stagnation Line (65 lines)
+    for y in np.linspace(y0 * 0.94, y1 * 0.94, 65):
         points.append(project_upstream(w_x_le, y, w_z_mid))
 
-    # 3. Wing Lower Pressure Surface (underside flow)
-    for y in np.linspace(y0 * 0.88, y1 * 0.88, 26):
-        points.append(project_upstream(w_x_le + 0.20 * w_chord, y, w_z_min - 0.006 * chord))
-        points.append(project_upstream(w_x_le + 0.35 * w_chord, y, w_z_min - 0.020 * chord))
+    # 3. Dense Wing Lower Pressure Surface (55 stations x 2 layers = 110 lines)
+    for y in np.linspace(y0 * 0.92, y1 * 0.92, 55):
+        points.append(project_upstream(w_x_le + 0.20 * w_chord, y, w_z_min - 0.005 * chord))
+        points.append(project_upstream(w_x_le + 0.35 * w_chord, y, w_z_min - 0.018 * chord))
 
-    # 4. Wingtip Vortex Rollups
+    # 4. Wingtip Vortex Rollups (12 lines)
     for sgn in [-1, 1]:
-        tip_y = sgn * (0.5 * span - 0.02 * span)
-        for dy in [0.005 * span, 0.02 * span]:
+        tip_y = sgn * (0.5 * span - 0.015 * span)
+        for dy in [0.004 * span, 0.012 * span, 0.025 * span]:
             points.append(project_upstream(w_x_le + 0.4 * w_chord, tip_y - sgn * dy, w_z_mid))
             points.append(project_upstream(w_x_le + 0.4 * w_chord, tip_y - sgn * dy, w_z_max + 0.01 * chord))
 
-    # 5. Fuselage Belly, Nose, Flanks and Canopy
-    for z_rel in np.linspace(f_z_min - 0.01 * chord, f_z_max * 0.7, 8):
-        for y_rel in [0.0, -0.04 * span, 0.04 * span]:
+    # 5. Dense Fuselage Belly, Nose, Flanks and Canopy (56 lines)
+    for z_rel in np.linspace(f_z_min - 0.008 * chord, f_z_max * 0.75, 8):
+        for y_rel in np.linspace(-0.055 * span, 0.055 * span, 7):
             points.append(project_upstream(f_x_nose + 0.15 * chord, y_rel, z_rel))
 
     pts_str = "\n".join([f"        ({p[0]:.4f} {p[1]:.4f} {p[2]:.4f})" for p in points])
