@@ -92,7 +92,7 @@ textarea{width:100%;height:140px;font:11.5px ui-monospace,monospace;background:v
       <button type="button" class="btn-sm" id="btn_m_wire" style="background:#475569">CFD Wireframe</button>
       <button type="button" class="btn-sm" id="btn_m_cp" style="background:#475569">Pressure Contours (Cp)</button>
       <button type="button" class="btn-sm" id="btn_flow_toggle" style="background:#64748b">Streamlines: OFF</button>
-      <button type="button" class="btn-sm" id="btn_flow_style" style="background:#0284c7">Flow Style: Lines</button>
+      <button type="button" class="btn-sm" id="btn_flow_style" style="background:#0284c7">Flow Style: Lines + Dots</button>
       <button type="button" class="btn-sm" id="btn_cam_reset" style="background:var(--mu)">Reset View</button>
     </div>
     <div style="font-size:12px;color:var(--mu);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -718,7 +718,7 @@ function renderYPlusSummary(yplusAvg, coveragePct){
 // =========================================================================
 let scene, camera, renderer, controls;
 let planeMesh=null, planePivot=null, currentModelAoA=4.0, solidMat, wireMat, cpMat;
-let flowStyle="lines"; // "lines" or "dots"
+let flowStyle="both"; // "both", "lines", or "dots"
 let streamlineLinesGroup=null, streamlineParticleSystem=null;
 let streamlineLineGeoms=[], streamlineDashedMats=[], streamlineCurves=[], streamlineParticles=[];
 let meshingScanGroup=null, meshingScanPlane=null, meshingScanBox=null;
@@ -767,21 +767,6 @@ function init3DViewer(){
   dirLight2.position.set(-3, -2, -3);
   scene.add(dirLight2);
 
-  // Ground Mirror (Image 3 Wind Tunnel Studio Reflection Aesthetic)
-  if(typeof THREE.Reflector !== "undefined"){
-    try{
-      const floorMirror=new THREE.Reflector(new THREE.PlaneGeometry(12, 12), {
-        clipBias:0.003,
-        textureWidth:1024,
-        textureHeight:1024,
-        color:0x0b111a
-      });
-      floorMirror.position.y=-0.52;
-      floorMirror.rotation.x=-Math.PI/2;
-      scene.add(floorMirror);
-    }catch(e){ console.warn("Reflector floor error", e); }
-  }
-
   // High-Tech Wind Tunnel Ground Grid
   const grid=new THREE.GridHelper(6, 24, 0x0284c7, 0x1e293b);
   grid.position.y=-0.518;
@@ -801,17 +786,16 @@ function init3DViewer(){
     side:THREE.DoubleSide
   });
 
-  // Setup Aerodynamic Flow Streamlines & Meshing Scanner
-  createFlowVisualization();
+  // Setup Meshing Scanner
   createMeshingScanner();
 
   // Animation Loop
   animate3D();
 
-  // Pre-load solved aircraft model and real OpenFOAM solution on startup
-  loadAircraftModel("/runs/fa8891fe/stl", ()=>{
-    loadRealCfdData("fa8891fe");
-  });
+  // Clean initial state: wait for user to provide input CAD model
+  streamlinesVisible=false;
+  if($("viewer3d_overlay")) $("viewer3d_overlay").textContent="Wind Tunnel Ready: Select or drop a .step CAD model to inspect geometry & run CFD";
+  const b=$("v3d_badge"); if(b){ b.textContent="WIND TUNNEL READY"; b.style.background="#475569"; }
 
   // Window resize handler
   window.addEventListener("resize",()=>{
@@ -1380,6 +1364,48 @@ function getWingProfileAtZ(z, bounds){
   };
 }
 
+let flowLineMat = null;
+function getFlowLineMaterial(){
+  if(!flowLineMat){
+    flowLineMat = new THREE.ShaderMaterial({
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      uniforms: {
+        time: { value: 0 },
+        speed: { value: 1.0 },
+        opacity: { value: 0.92 }
+      },
+      vertexShader: `
+        attribute float lineDist;
+        varying float vDist;
+        varying vec3 vColor;
+        void main() {
+          vDist = lineDist;
+          vColor = color;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float time;
+        uniform float speed;
+        uniform float opacity;
+        varying float vDist;
+        varying vec3 vColor;
+        void main() {
+          // Dynamic flow pulses traveling downstream along streamline distance
+          float phase = fract(vDist * 6.5 - time * speed * 2.5);
+          float pulse = smoothstep(0.0, 0.22, phase) * smoothstep(1.0, 0.50, phase);
+          vec3 col = vColor * (0.38 + 1.25 * pulse);
+          float a = opacity * (0.42 + 0.58 * pulse);
+          gl_FragColor = vec4(col, a);
+        }
+      `
+    });
+  }
+  return flowLineMat;
+}
+
 function createFlowVisualization(){
   if(streamlineLinesGroup){
     if(planeMesh) planeMesh.remove(streamlineLinesGroup);
@@ -1401,6 +1427,8 @@ function createFlowVisualization(){
   const bounds=getAircraftBounds();
   const aoaVal=currentModelAoA;
   const aoaRad=(aoaVal*Math.PI)/180;
+  const cosA=Math.cos(-aoaRad);
+  const sinA=Math.sin(-aoaRad);
   const downwashSlope=-Math.sin(aoaRad)*0.45;
 
   const seeds=[];
@@ -1461,95 +1489,109 @@ function createFlowVisualization(){
   seeds.push({ z: -fR * 0.60, yOffset: -fR * 0.68, isUpper: false, type: "fuse_bot" });
 
   const numPointsPerLine=95;
-  const xStart=bounds.xNose - 1.6; // Inflow rake in front of aircraft
-  const xEnd=bounds.xTail + 1.6; // Trailing wake downstream
+  const xStart=-1.65;
+  const xEnd=1.65;
 
   seeds.forEach((seed)=>{
     const pts=[];
     const colors=[];
     const prof=getWingProfileAtZ(seed.z, bounds);
-    const chord=Math.max(0.04, prof.teX - prof.leX);
+
+    // Tilted coordinates of wing leading/trailing edge in World Space
+    const leX_rot = prof.leX * cosA - prof.upperY * sinA;
+    const leY_rot = prof.leX * sinA + prof.upperY * cosA;
+    const teX_rot = prof.teX * cosA - prof.upperY * sinA;
+    const teY_rot = prof.teX * sinA + prof.upperY * cosA;
+    const noseX_rot = bounds.xNose * cosA;
+    const noseY_rot = bounds.xNose * sinA;
+    const tailX_rot = bounds.xTail * cosA;
+    const tailY_rot = bounds.xTail * sinA;
+
+    // Fixed horizontal inflow height (parallel to wind tunnel ground, strictly horizontal dy/dx = 0)
+    const inflowY = (seed.type === "fuse_top" || seed.type === "fuse_bot" || seed.type === "fuse_side")
+      ? (noseY_rot + seed.yOffset)
+      : (leY_rot + seed.yOffset);
 
     for(let k=0; k<numPointsPerLine; k++){
-      const x=xStart + (k / (numPointsPerLine - 1)) * (xEnd - xStart);
-      let y=prof.upperY;
-      let z=seed.z;
-
-      // Color defaults to CFD Vibrant Emerald Green (Image 2 style)
-      let rCol=0.12, gCol=0.80, bCol=0.30;
+      const x = xStart + (k / (numPointsPerLine - 1)) * (xEnd - xStart);
+      let y = inflowY;
+      let z = seed.z;
+      let rCol = 0.12, gCol = 0.80, bCol = 0.30; // Emerald Green freestream
 
       if(seed.type === "fuse_top" || seed.type === "fuse_bot" || seed.type === "fuse_side"){
-        // Streamlines following fuselage contour
-        if(x < bounds.xNose){
+        if(x <= noseX_rot - 0.20){
           // Upstream freestream is 100% straight and horizontal (parallel to ground)
-          y=bounds.fuseCenterY + seed.yOffset;
-          rCol=0.12; gCol=0.80; bCol=0.30;
-        } else if(x >= bounds.xNose && x <= bounds.xTail){
-          const fx=(x - bounds.xNose) / Math.max(0.1, bounds.xTail - bounds.xNose);
-          const bodyRad=bounds.fuseRadius * Math.sin(Math.min(Math.PI, fx * Math.PI));
-          if(seed.type === "fuse_top") y=bounds.fuseCenterY + bodyRad + 0.016;
-          else if(seed.type === "fuse_bot") y=bounds.fuseCenterY - bodyRad - 0.014;
+          y = inflowY;
+          rCol = 0.12; gCol = 0.80; bCol = 0.30;
+        } else if(x > noseX_rot - 0.20 && x < noseX_rot){
+          // Smooth Hermite approach to tilted nose
+          const u = (x - (noseX_rot - 0.20)) / 0.20;
+          const h = u * u * (3.0 - 2.0 * u);
+          y = inflowY + (seed.type === "fuse_top" ? 0.012 : (seed.type === "fuse_bot" ? -0.012 : 0.0)) * Math.sin(h * Math.PI * 0.5);
+          rCol = 0.35; gCol = 0.82; bCol = 0.25;
+        } else if(x >= noseX_rot && x <= tailX_rot){
+          // Over tilted fuselage body
+          const fx = (x - noseX_rot) / Math.max(0.1, tailX_rot - noseX_rot);
+          const yAxis = noseY_rot + fx * (tailY_rot - noseY_rot);
+          const bodyRad = bounds.fuseRadius * Math.sin(Math.min(Math.PI, fx * Math.PI));
+          if(seed.type === "fuse_top") y = yAxis + bodyRad + 0.016;
+          else if(seed.type === "fuse_bot") y = yAxis - bodyRad - 0.014;
           else if(seed.type === "fuse_side"){
-            z=(seed.z > 0 ? 1 : -1) * (bodyRad + 0.018);
-            y=bounds.fuseCenterY;
+            z = (seed.z > 0 ? 1 : -1) * (bodyRad + 0.018);
+            y = yAxis;
           }
-          rCol=0.35; gCol=0.82; bCol=0.25;
+          rCol = 0.40; gCol = 0.85; bCol = 0.20;
         } else {
-          y=bounds.fuseCenterY + seed.yOffset + (x - bounds.xTail) * downwashSlope;
-          rCol=0.12; gCol=0.80; bCol=0.30;
+          // Fuselage wake downwash
+          const dx = x - tailX_rot;
+          y = tailY_rot + seed.yOffset + dx * downwashSlope;
+          rCol = 0.14; gCol = 0.80; bCol = 0.32;
         }
       } else {
         // Wing Streamlines
-        if(x < bounds.xNose){
+        const hitStartX = noseX_rot - 0.22;
+        if(x <= hitStartX){
           // Upstream freestream approach is 100% straight and horizontal (parallel to ground)
-          y=(seed.isUpper ? prof.upperY + seed.yOffset : prof.lowerY + seed.yOffset);
-          rCol=0.12; gCol=0.80; bCol=0.30; // Emerald Green
-        } else if(x >= bounds.xNose && x < prof.leX){
-          // Deflection and smooth lift approaching wing leading edge
-          const u=(x - bounds.xNose) / Math.max(0.05, prof.leX - bounds.xNose);
-          y=(seed.isUpper ? prof.upperY + 0.022 : prof.lowerY - 0.022) + (seed.isUpper ? 0.012 * Math.sin(u * Math.PI * 0.5) : -0.008);
-          // Accelerating flow: Chartreuse / Lime Green
-          rCol=0.45; gCol=0.85; bCol=0.15;
-        } else if(x >= prof.leX && x <= prof.teX){
-          // Over wing chord: Drapes smoothly over suction camber and accelerates over suction peak
-          const chordFrac=(x - prof.leX) / chord;
+          y = inflowY;
+          rCol = 0.12; gCol = 0.80; bCol = 0.30;
+        } else if(x > hitStartX && x < leX_rot){
+          // Deflection and smooth lift approaching tilted wing leading edge
+          const u = (x - hitStartX) / Math.max(0.04, leX_rot - hitStartX);
+          const h = u * u * (3.0 - 2.0 * u);
+          y = inflowY + (seed.isUpper ? 0.016 : -0.012) * Math.sin(h * Math.PI * 0.5);
+          rCol = 0.45; gCol = 0.85; bCol = 0.15;
+        } else if(x >= leX_rot && x <= teX_rot){
+          // Over tilted wing chord: Drapes smoothly over tilted suction camber
+          const chordSpan = Math.max(0.02, teX_rot - leX_rot);
+          const s = (x - leX_rot) / chordSpan;
+          const yChord = leY_rot + s * (teY_rot - leY_rot);
           if(seed.isUpper){
-            // Suction camber hump: hugs upper wing skin without cutting through
-            const camberHump=0.038 * Math.sin(Math.pow(chordFrac, 0.65) * Math.PI) * (1.0 - 0.20 * chordFrac);
-            y=prof.upperY + camberHump + Math.max(0.008, seed.yOffset);
-            
-            // Image 2 exact palette: High suction turns Bright Yellow to Crimson Red!
-            if(chordFrac >= 0.12 && chordFrac <= 0.48){
-              // Suction peak: Hot Crimson Red
-              rCol=0.94; gCol=0.18; bCol=0.14;
-            } else if(chordFrac > 0.48 && chordFrac <= 0.72){
-              // Radiant Yellow transition
-              rCol=0.95; gCol=0.80; bCol=0.10;
+            const camberHump = 0.038 * Math.sin(Math.pow(s, 0.65) * Math.PI) * (1.0 - 0.20 * s);
+            y = yChord + camberHump + Math.max(0.008, seed.yOffset);
+            if(s >= 0.12 && s <= 0.48){
+              rCol = 0.94; gCol = 0.18; bCol = 0.14; // Hot Crimson Red suction peak
+            } else if(s > 0.48 && s <= 0.72){
+              rCol = 0.95; gCol = 0.80; bCol = 0.10; // Radiant Yellow
             } else {
-              // Green leading/trailing edge
-              rCol=0.25; gCol=0.82; bCol=0.25;
+              rCol = 0.25; gCol = 0.82; bCol = 0.25; // Lime Green
             }
           } else {
-            // Lower pressure surface: stays just beneath wing
-            y=prof.lowerY - 0.008 * Math.sin(chordFrac * Math.PI) + seed.yOffset;
-            rCol=0.10; gCol=0.80; bCol=0.60;
+            y = yChord - 0.008 * Math.sin(s * Math.PI) + seed.yOffset;
+            rCol = 0.10; gCol = 0.80; bCol = 0.60; // Cyan pressure surface
           }
         } else {
-          // Downstream wake behind trailing edge: Downwash and wingtip vortex curls
-          const dx=x - prof.teX;
+          // Downstream wake behind tilted trailing edge
+          const dx = x - teX_rot;
           if(seed.type === "tip_vortex"){
-            // Wingtip trailing vortex spiral (Image 2 style)
-            const vRadius=0.045 * (1.0 - Math.exp(-dx * 3.5));
-            const vAngle=dx * 16.0;
-            const dir=(seed.z > 0) ? 1 : -1;
-            y=prof.upperY + 0.012 + Math.sin(vAngle) * vRadius + dx * downwashSlope;
-            z=seed.z + Math.cos(vAngle) * vRadius * dir;
-            // Neon Violet / Purple trailing vortex highlight
-            rCol=0.70; gCol=0.35; bCol=0.96;
+            const vRadius = 0.045 * (1.0 - Math.exp(-dx * 3.5));
+            const vAngle = dx * 16.0;
+            const dir = (seed.z > 0) ? 1 : -1;
+            y = teY_rot + 0.012 + Math.sin(vAngle) * vRadius + dx * downwashSlope;
+            z = seed.z + Math.cos(vAngle) * vRadius * dir;
+            rCol = 0.70; gCol = 0.35; bCol = 0.96; // Neon Violet
           } else {
-            // Wake downwash
-            y=(seed.isUpper ? prof.upperY + 0.012 : prof.lowerY - 0.012) + dx * downwashSlope;
-            rCol=0.14; gCol=0.80; bCol=0.32; // Emerald Green
+            y = (seed.isUpper ? teY_rot + 0.012 : teY_rot - 0.012) + dx * downwashSlope;
+            rCol = 0.14; gCol = 0.80; bCol = 0.32;
           }
         }
       }
@@ -1560,7 +1602,7 @@ function createFlowVisualization(){
 
     streamlineCurves.push({ pts, colors });
 
-    // Build Continuous 3D Line Ribbons (Image 2 style)
+    // Build Continuous 3D Flow Line Ribbons with GPU traveling pulses
     const geo=new THREE.BufferGeometry().setFromPoints(pts);
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
 
@@ -1571,21 +1613,14 @@ function createFlowVisualization(){
       dist += pts[j].distanceTo(pts[j-1]);
       distances[j]=dist;
     }
-    geo.setAttribute('lineDistance', new THREE.BufferAttribute(distances, 1));
+    geo.setAttribute('lineDist', new THREE.BufferAttribute(distances, 1));
     streamlineLineGeoms.push(geo);
 
-    // Continuous smooth aerodynamic streamline line (Image 2 style)
-    const lineMat=new THREE.LineBasicMaterial({
-      vertexColors:true,
-      transparent:true,
-      opacity:0.90,
-      depthWrite:false
-    });
-    const lineObj=new THREE.Line(geo, lineMat);
+    const lineObj=new THREE.Line(geo, getFlowLineMaterial());
     streamlineLinesGroup.add(lineObj);
   });
 
-  streamlineLinesGroup.visible=false;
+  streamlineLinesGroup.visible = streamlinesVisible && (flowStyle === "lines" || flowStyle === "both");
   scene.add(streamlineLinesGroup);
 
   // Build Particle Dots system traveling along the same curves
@@ -1702,17 +1737,10 @@ function animate3D(){
 
     // 2. Animate Streamlines (Simulation Video Effect)
     if(streamlinesVisible){
-      // Advance animated flow dashes along continuous contour lines in WebGL
-      const lineStep=flowSpeedMult*0.022;
-      for(let i=0; i<streamlineLineGeoms.length; i++){
-        const ld=streamlineLineGeoms[i].attributes.lineDistance;
-        if(ld && ld.array){
-          const arr=ld.array;
-          for(let j=0; j<arr.length; j++){
-            arr[j] += lineStep;
-          }
-          ld.needsUpdate=true;
-        }
+      // Advance traveling fluid pulses on streamline lines via GPU shader
+      if(flowLineMat && flowLineMat.uniforms){
+        flowLineMat.uniforms.time.value += 0.016;
+        flowLineMat.uniforms.speed.value = flowSpeedMult;
       }
 
       // Advance fluid particles along surface flow pathways
@@ -1773,13 +1801,8 @@ function setStreamlines(active){
   const showLines = active && (flowStyle==="lines"||flowStyle==="both");
   const showDots = active && (flowStyle==="dots"||flowStyle==="both");
 
-  if(realStreamlinesGroup && hasRealStreamlines){
-    realStreamlinesGroup.visible = showLines;
-    if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
-  } else {
-    if(realStreamlinesGroup) realStreamlinesGroup.visible = false;
-    if(streamlineLinesGroup) streamlineLinesGroup.visible = showLines;
-  }
+  if(streamlineLinesGroup) streamlineLinesGroup.visible = showLines;
+  if(realStreamlinesGroup) realStreamlinesGroup.visible = false;
   if(streamlineParticleSystem) streamlineParticleSystem.visible = showDots;
   const btn=$("btn_flow_toggle");
   if(btn){
@@ -1826,18 +1849,18 @@ $("btn_flow_toggle").onclick=()=>{
 };
 
 $("btn_flow_style").onclick=()=>{
-  if(flowStyle==="lines"){
-    flowStyle="dots";
-    $("btn_flow_style").textContent="Flow Style: Dots";
-    $("btn_flow_style").style.background="#8b5cf6";
-  } else if(flowStyle==="dots"){
-    flowStyle="both";
-    $("btn_flow_style").textContent="Flow Style: Lines + Dots";
-    $("btn_flow_style").style.background="#0284c7";
-  } else {
+  if(flowStyle==="both"){
     flowStyle="lines";
     $("btn_flow_style").textContent="Flow Style: Lines";
     $("btn_flow_style").style.background="#059669";
+  } else if(flowStyle==="lines"){
+    flowStyle="dots";
+    $("btn_flow_style").textContent="Flow Style: Dots";
+    $("btn_flow_style").style.background="#8b5cf6";
+  } else {
+    flowStyle="both";
+    $("btn_flow_style").textContent="Flow Style: Lines + Dots";
+    $("btn_flow_style").style.background="#0284c7";
   }
   setStreamlines(streamlinesVisible);
 };
@@ -1868,25 +1891,10 @@ function setViewerAoA(aoa, updateInputs = true){
     inpA.value = currentModelAoA;
   }
 
-  // If real OpenFOAM streamlines are available
-  if(hasRealStreamlines && realStreamlinesGroup && solvedCfdAoA !== null){
-    const isAtSolved = Math.abs(currentModelAoA - solvedCfdAoA) < 0.25;
-    if(isAtSolved){
-      realStreamlinesGroup.visible = streamlinesVisible && (flowStyle === "lines" || flowStyle === "both");
-      if(streamlineLinesGroup) streamlineLinesGroup.visible = false;
-      const countTracks = dataTracksCount || (realStreamlinesGroup.children.length / 2);
-      $("viewer3d_overlay").textContent = `Real OpenFOAM CFD Solution: ${countTracks} Solved Navier-Stokes Streamlines & Surface Cp (${solvedCfdAoA >= 0 ? "+" : ""}${solvedCfdAoA.toFixed(1)}° AoA)`;
-      createStreamlineParticleDots();
-    } else {
-      // User moved AoA slider to preview different angle: flow is straight horizontal hitting tilted model
-      realStreamlinesGroup.visible = false;
-      createFlowVisualization();
-      setStreamlines(streamlinesVisible);
-      $("viewer3d_overlay").textContent = `Interactive Flow Preview: Model tilted to ${currentModelAoA >= 0 ? "+" : ""}${currentModelAoA.toFixed(1)}° AoA (Straight oncoming inflow hitting tilted model)`;
-    }
-  } else if(planeMesh){
+  if(planeMesh){
     createFlowVisualization();
     setStreamlines(streamlinesVisible);
+    $("viewer3d_overlay").textContent = `Interactive Flow Field: Model tilted to ${currentModelAoA >= 0 ? "+" : ""}${currentModelAoA.toFixed(1)}° AoA (Straight oncoming inflow hitting tilted model)`;
   }
 }
 

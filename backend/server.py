@@ -217,7 +217,7 @@ class H(BaseHTTPRequestHandler):
         if len(p) == 3 and p[0] == "runs" and p[2] == "report":
             f = os.path.join(WORK, os.path.basename(p[1]), "report.md")
             return self._j(200, open(f).read(), "text/markdown") if os.path.exists(f) else self._j(404, {"error": "no report yet"})
-        if len(p) == 3 and p[0] == "runs" and p[2] == "results":
+        if len(p) == 3 and p[0] == "runs" and p[2] in ("results", "results.json"):
             f = os.path.join(WORK, os.path.basename(p[1]), "results.json")
             return self._j(200, open(f).read(), "application/json") if os.path.exists(f) else self._j(404, {"error": "no results yet"})
         if len(p) == 3 and p[0] == "runs" and p[2] == "cp.png":
